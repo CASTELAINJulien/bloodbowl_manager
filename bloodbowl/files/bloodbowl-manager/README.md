@@ -1,90 +1,116 @@
-# 🏈 Blood Bowl Manager
+# Blood Bowl Manager
 
-Gestionnaire auto-hébergé de tournois et ligues **Blood Bowl** — inspiré de TourPlay.
+Gestionnaire auto-hébergé de tournois et ligues **Blood Bowl**, inspiré de TourPlay.
 
-Stack légère pensée pour tourner sur un petit serveur perso :
-- **Backend** : Node.js + Express + SQLite (zéro service externe)
-- **Frontend** : SPA HTML/CSS/JS vanilla (pas de build, pas de npm côté client)
-- **Reverse-proxy** : Caddy 2 (HTTPS automatique via Let's Encrypt)
-- **Conteneurisation** : Docker Compose
+Stack légère conçue pour un petit serveur perso :
 
-## ✨ Fonctionnalités
+| Composant | Technologie |
+|-----------|-------------|
+| Backend | Node.js 20 + Express + SQLite (better-sqlite3) |
+| Frontend | SPA HTML/CSS/JS vanilla — aucun build requis |
+| Reverse-proxy | Caddy 2 — HTTPS automatique via Let's Encrypt |
+| Conteneurisation | Docker Compose |
 
-- Authentification (JWT) avec rôle admin (premier inscrit)
-- Création de tournois en formats **Suisse**, **Round Robin**, **Élimination directe** ou **Ligue**
-- Inscriptions d'équipes avec les 29 races officielles Blood Bowl 2020
+## Fonctionnalités
+
+**Tournois**
+- Formats : **Suisse**, **Round Robin**, **Élimination directe**, **Ligue**
 - Génération automatique des appariements tour par tour
-- Saisie des scores (TD + Casualties) par les organisateurs ou les coachs concernés
+- Saisie des scores (TD + Casualties) par l'organisateur ou les coachs concernés
 - Classement temps réel : points, différentiel TD, différentiel CAS
-- Système de points configurable (par défaut 3 / 1 / 0)
-- Vue podium, statistiques, historique des matchs
+- Système de points configurable (défaut : 3 / 1 / 0)
+- Vue podium, statistiques et historique des matchs
+- Export PDF du classement
 
-## 🚀 Mise en route
+**Équipes & Joueurs**
+- 29 races officielles Blood Bowl 2020
+- Gestion complète de rosters (joueurs, stats, compétences BB 2025, trésorerie, relances)
+- Système d'inducements
 
-### 1. Prérequis
-- Docker + Docker Compose installés
-- Pour HTTPS public : un nom de domaine pointant vers votre serveur, ports 80 et 443 ouverts
+**Gestion**
+- Authentification JWT — le premier compte créé devient automatiquement administrateur
+- Rate-limiting sur les routes d'authentification
 
-### 2. Installation
+## Mise en route
+
+### Prérequis
+- Docker + Docker Compose
+- Pour HTTPS public : un domaine pointant vers le serveur, ports 80 et 443 ouverts
+
+### Installation
 ```bash
 git clone <votre-repo> bloodbowl-manager
 cd bloodbowl-manager
 cp .env.example .env
 ```
 
-### 3. Configurer `.env`
+### Configurer `.env`
+
+Générez un secret JWT robuste :
 ```bash
-# Génère un secret JWT solide
 openssl rand -base64 48
 ```
-Édite `.env` :
+
+Puis éditez `.env` :
 ```env
 JWT_SECRET=<le secret généré ci-dessus>
-SITE_ADDRESS=bloodbowl.mondomaine.fr   # ou "localhost" pour test
+SITE_ADDRESS=bloodbowl.mondomaine.fr   # ou "localhost" pour test local
+
+# Optionnel — valeurs par défaut indiquées
+HTTP_PORT=80
+HTTPS_PORT=443
+DB_DIR=/app/data
 ```
 
-### 4. Lancer
+### Lancer
 ```bash
 docker compose up -d --build
 ```
 
-C'est tout. Caddy obtient automatiquement le certificat HTTPS si vous utilisez un vrai domaine.
+Caddy obtient automatiquement le certificat HTTPS si vous utilisez un vrai domaine.
 
-### 5. Accéder
+### Accéder
 - Avec un domaine : `https://bloodbowl.mondomaine.fr`
-- En local : `https://localhost` (accepter le certificat auto-signé) ou `http://localhost` si vous mettez `SITE_ADDRESS=:80`
+- En local : `https://localhost` (accepter le certificat auto-signé)
+- HTTP uniquement : mettre `SITE_ADDRESS=:80`
 
-> **Le premier compte créé devient automatiquement administrateur.** Inscrivez-vous immédiatement !
+> **Le premier compte créé devient automatiquement administrateur.** Inscrivez-vous immédiatement après le démarrage.
 
-## 🗂️ Structure
+## Structure du projet
 ```
 bloodbowl-manager/
-├── docker-compose.yml      # Orchestration
-├── .env.example            # Modèle de configuration
+├── docker-compose.yml
+├── .env.example
 ├── caddy/
-│   └── Caddyfile           # Reverse-proxy + HTTPS auto
+│   └── Caddyfile             # Reverse-proxy + HTTPS + en-têtes de sécurité
 ├── backend/
 │   ├── Dockerfile
-│   ├── server.js           # API Express
-│   ├── db.js               # Schéma SQLite
-│   ├── auth.js             # JWT + bcrypt
-│   └── pairings.js         # Algos d'appariement
+│   ├── package.json
+│   ├── server.js             # API Express
+│   ├── db.js                 # Schéma SQLite + migrations
+│   ├── auth.js               # JWT + bcrypt
+│   ├── pairings.js           # Algorithmes d'appariement
+│   ├── rosters.js            # Gestion des rosters
+│   ├── inducements.js        # Système d'inducements
+│   └── skills-bb2025.js      # Compétences Blood Bowl 2025
 └── frontend/
     ├── index.html
-    ├── styles.css          # Thème "Iron & Blood"
-    └── app.js              # SPA + router
+    ├── app.js                # SPA + routeur
+    ├── rosters.js            # Interface roster
+    ├── pdf-export.js         # Export PDF
+    └── styles.css            # Thème NETBLITZ
 ```
 
-## 🔧 Commandes utiles
+## Commandes utiles
 ```bash
 # Logs en direct
 docker compose logs -f
 
-# Redémarrer après modif Caddyfile
-docker compose restart caddy
-
-# Reconstruire le backend après modif code
+# Reconstruire le backend après modification du code
 docker compose up -d --build backend
+
+# Redémarrer Caddy après modification du Caddyfile
+docker compose restart caddy
 
 # Sauvegarder la base
 docker compose exec backend sh -c "cp /app/data/bloodbowl.db /app/data/backup-$(date +%F).db"
@@ -96,31 +122,33 @@ docker compose down
 docker compose down -v
 ```
 
-## 💾 Sauvegardes
-Les données SQLite sont dans le volume Docker `bb_data`. Pour sauvegarder :
+## Sauvegardes
+
+Les données SQLite sont dans le volume Docker `bb_data` :
 ```bash
-docker run --rm -v bloodbowl-manager_bb_data:/data -v $(pwd):/backup alpine \
-  tar czf /backup/bb-backup-$(date +%F).tar.gz -C /data .
+docker run --rm \
+  -v bloodbowl-manager_bb_data:/data \
+  -v $(pwd):/backup \
+  alpine tar czf /backup/bb-backup-$(date +%F).tar.gz -C /data .
 ```
 
-## 🎨 Personnaliser
-- **Thème** : modifier les variables CSS dans `frontend/styles.css` (section `:root`)
-- **Races** : ajuster la liste `BB_RACES` dans `backend/server.js`
+## Personnalisation
+- **Thème** : variables CSS dans `frontend/styles.css` (section `:root`)
+- **Races** : liste `BB_RACES` dans `backend/server.js`
 - **Système de points** : configurable par tournoi dans l'interface
 
-## 🔒 Sécurité
-- Toujours utiliser un `JWT_SECRET` fort et unique
-- Caddy gère TLS automatiquement avec Let's Encrypt
-- Rate-limiting actif sur les routes d'authentification
+## Sécurité
+- Utiliser un `JWT_SECRET` fort et unique
+- Caddy gère TLS automatiquement (Let's Encrypt) et applique les en-têtes de sécurité (HSTS, X-Frame-Options, etc.)
+- Rate-limiting actif sur les routes `/auth/*` (20 requêtes / 15 min)
 - Le backend n'est jamais exposé directement, uniquement via Caddy
 
-## 🛣️ Idées d'évolution
+## Idées d'évolution
 - Bracket visuel pour l'élimination directe
-- Export PDF du classement
-- Stats joueurs individuels (skills, MVP, etc.)
+- Stats joueurs individuels (SPP, MVP, blessures persistantes)
 - Mode ligue persistante avec saisons
 - Webhooks Discord pour annoncer les résultats
 - Intégration NAF Rank
 
-## 📜 Licence
-À vous de choisir — ce code est fourni tel quel pour usage personnel.
+## Licence
+Code fourni tel quel pour usage personnel — libre à vous de choisir une licence.
