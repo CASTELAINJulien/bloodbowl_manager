@@ -25,6 +25,8 @@ export function computeStandings(tournamentId) {
       played: 0, wins: 0, draws: 0, losses: 0,
       td_for: 0, td_against: 0, td_diff: 0,
       cas_for: 0, cas_against: 0, cas_diff: 0,
+      passes_for: 0, passes_against: 0,
+      aggressions_for: 0, aggressions_against: 0,
       points: 0,
       opponents: [], // pour le système suisse
     };
@@ -41,6 +43,10 @@ export function computeStandings(tournamentId) {
     b.td_for += m.td2; b.td_against += m.td1;
     a.cas_for += m.cas1; a.cas_against += m.cas2;
     b.cas_for += m.cas2; b.cas_against += m.cas1;
+    a.passes_for += (m.passes1 || 0); a.passes_against += (m.passes2 || 0);
+    b.passes_for += (m.passes2 || 0); b.passes_against += (m.passes1 || 0);
+    a.aggressions_for += (m.aggressions1 || 0); a.aggressions_against += (m.aggressions2 || 0);
+    b.aggressions_for += (m.aggressions2 || 0); b.aggressions_against += (m.aggressions1 || 0);
     a.opponents.push(m.team2_id);
     b.opponents.push(m.team1_id);
 

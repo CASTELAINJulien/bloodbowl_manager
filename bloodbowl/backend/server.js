@@ -129,6 +129,68 @@ function canManage(req, tournamentId) {
   return t && t.organizer_id === req.user.id;
 }
 
+// Vrai si l'utilisateur connecté est l'un des deux coachs du match
+function isMatchCoach(req, match) {
+  if (!req.user || !match) return false;
+  const t1 = match.team1_id ? db.prepare('SELECT user_id FROM teams WHERE id = ?').get(match.team1_id) : null;
+  const t2 = match.team2_id ? db.prepare('SELECT user_id FROM teams WHERE id = ?').get(match.team2_id) : null;
+  return (t1 && t1.user_id === req.user.id) || (t2 && t2.user_id === req.user.id);
+}
+
+// Météo Blood Bowl selon la somme de 2d6
+function weatherFor(sum) {
+  if (sum === 2) return 'Canicule';
+  if (sum === 3) return 'Très ensoleillé';
+  if (sum === 11) return 'Averse';
+  if (sum === 12) return 'Blizzard';
+  return 'Météo clémente'; // 4 à 10
+}
+
+function listMatchEvents(matchId) {
+  return db.prepare('SELECT * FROM match_events WHERE match_id = ? ORDER BY id').all(matchId);
+}
+
+function logMatchEvent(matchId, type, teamSide, detail) {
+  db.prepare('INSERT INTO match_events (match_id, type, team_side, detail) VALUES (?, ?, ?, ?)')
+    .run(matchId, type, teamSide ?? null, detail || null);
+}
+
+// Valeur d'équipe (en or complet) calculée depuis le roster builder, avec la
+// même formule que le frontend : joueurs (coût + progressions) + staff de banc
+// + inducements achetés. Le builder raisonne en "k" (1000k = 1M) → ×1000 pour
+// rester cohérent avec les TV saisies à la main dans les tournois.
+function computeRosterTeamValue(rosterTeamId) {
+  const team = db.prepare('SELECT * FROM roster_teams WHERE id = ?').get(rosterTeamId);
+  if (!team) return 0;
+  const roster = ROSTERS[team.race_key];
+
+  const players = db.prepare(
+    'SELECT cost, extras_cost FROM roster_players WHERE roster_team_id = ?'
+  ).all(rosterTeamId);
+  const playersCost = players.reduce((s, p) => s + (p.cost || 0) + (p.extras_cost || 0), 0);
+
+  const rerollCost = roster ? roster.rerollCost : 0;
+  const sidelineCost =
+      (team.rerolls || 0) * rerollCost
+    + (team.apothecary || 0) * 50
+    + (team.assistant_coaches || 0) * 10
+    + (team.cheerleaders || 0) * 10
+    + Math.max(0, (team.dedicated_fans || 0) - 1) * 10;
+
+  let inducementsCost = 0;
+  if (roster) {
+    const available = getAvailableInducements(roster);
+    const rows = db.prepare(
+      'SELECT inducement_key, quantity FROM roster_inducements WHERE roster_team_id = ?'
+    ).all(rosterTeamId);
+    const qtyByKey = {};
+    for (const r of rows) qtyByKey[r.inducement_key] = r.quantity;
+    for (const ind of available) inducementsCost += (qtyByKey[ind.key] || 0) * ind.effectiveCost;
+  }
+
+  return (playersCost + sidelineCost + inducementsCost) * 1000;
+}
+
 app.put('/api/tournaments/:id', authMiddleware(), (req, res) => {
   if (!canManage(req, req.params.id)) return res.status(403).json({ error: 'Non autorisé' });
   const allowed = ['name', 'description', 'format', 'status', 'max_teams', 'start_date', 'end_date',
@@ -159,25 +221,50 @@ app.get('/api/tournaments/:id/teams', (req, res) => {
   res.json(teams);
 });
 
-app.post('/api/tournaments/:id/teams', authMiddleware(), (req, res) => {
-  const { name, coach_name, race, team_value = 0 } = req.body || {};
-  if (!name || !coach_name || !race) return res.status(400).json({ error: 'Champs requis' });
-  if (!BB_RACES.includes(race)) return res.status(400).json({ error: 'Race invalide' });
+// Assigner une de SES équipes (roster builder) à un tournoi pas encore commencé
+app.post('/api/tournaments/:id/assign-team', authMiddleware(), (req, res) => {
+  const { roster_team_id } = req.body || {};
+  if (!roster_team_id) return res.status(400).json({ error: 'roster_team_id requis' });
 
   const t = db.prepare('SELECT * FROM tournaments WHERE id = ?').get(req.params.id);
   if (!t) return res.status(404).json({ error: 'Tournoi introuvable' });
-  if (t.status !== 'registration' && !canManage(req, req.params.id)) {
-    return res.status(400).json({ error: 'Inscriptions fermées' });
+  if (t.status === 'in_progress' || t.status === 'completed') {
+    return res.status(400).json({ error: 'Le tournoi a déjà commencé' });
   }
+
+  // L'équipe doit appartenir à l'utilisateur connecté
+  const roster = db.prepare('SELECT * FROM roster_teams WHERE id = ? AND user_id = ?')
+    .get(roster_team_id, req.user.id);
+  if (!roster) return res.status(404).json({ error: 'Équipe introuvable' });
+
+  // Pas deux fois la même équipe dans le même tournoi
+  const dup = db.prepare(
+    'SELECT id FROM teams WHERE tournament_id = ? AND roster_team_id = ?'
+  ).get(req.params.id, roster.id);
+  if (dup) return res.status(400).json({ error: 'Cette équipe est déjà inscrite à ce tournoi' });
+
+  // Une seule équipe par personne (sauf organisateur/admin qui peut en aligner plusieurs)
+  if (!canManage(req, req.params.id)) {
+    const mine = db.prepare(
+      'SELECT id FROM teams WHERE tournament_id = ? AND user_id = ?'
+    ).get(req.params.id, req.user.id);
+    if (mine) return res.status(400).json({ error: 'Vous avez déjà une équipe dans ce tournoi (1 par personne)' });
+  }
+
   if (t.max_teams) {
-    const c = db.prepare('SELECT COUNT(*) as c FROM teams WHERE tournament_id = ?').get(req.params.id).c;
+    const c = db.prepare('SELECT COUNT(*) AS c FROM teams WHERE tournament_id = ?').get(req.params.id).c;
     if (c >= t.max_teams) return res.status(400).json({ error: 'Tournoi complet' });
   }
 
+  const raceName = ROSTERS[roster.race_key] ? ROSTERS[roster.race_key].name : roster.race_key;
+  const coachName = roster.coach_name || req.user.username;
+  const teamValue = computeRosterTeamValue(roster.id);
+
   const result = db.prepare(`
-    INSERT INTO teams (tournament_id, name, coach_name, race, team_value, user_id)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `).run(req.params.id, name, coach_name, race, team_value, req.user.id);
+    INSERT INTO teams (tournament_id, name, coach_name, race, team_value, user_id, roster_team_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(req.params.id, roster.name, coachName, raceName, teamValue, req.user.id, roster.id);
+
   res.json(db.prepare('SELECT * FROM teams WHERE id = ?').get(result.lastInsertRowid));
 });
 
@@ -238,24 +325,115 @@ app.post('/api/tournaments/:id/next-round', authMiddleware(), (req, res) => {
 app.put('/api/matches/:id', authMiddleware(), (req, res) => {
   const match = db.prepare('SELECT * FROM matches WHERE id = ?').get(req.params.id);
   if (!match) return res.status(404).json({ error: 'Match introuvable' });
-  if (!canManage(req, match.tournament_id)) {
-    // Les coachs participants peuvent aussi enregistrer le score
-    const t1 = db.prepare('SELECT user_id FROM teams WHERE id = ?').get(match.team1_id);
-    const t2 = db.prepare('SELECT user_id FROM teams WHERE id = ?').get(match.team2_id);
-    if (!t1 || !t2 || (t1.user_id !== req.user.id && t2.user_id !== req.user.id)) {
-      return res.status(403).json({ error: 'Non autorisé' });
-    }
+  if (!canManage(req, match.tournament_id) && !isMatchCoach(req, match)) {
+    return res.status(403).json({ error: 'Non autorisé' });
   }
-  const { td1, td2, cas1 = 0, cas2 = 0, status = 'completed', notes } = req.body || {};
+  const {
+    td1, td2, cas1 = 0, cas2 = 0,
+    passes1 = 0, passes2 = 0, aggressions1 = 0, aggressions2 = 0,
+    status = 'completed', notes,
+  } = req.body || {};
   if (typeof td1 !== 'number' || typeof td2 !== 'number') {
     return res.status(400).json({ error: 'Touchdowns requis' });
   }
   db.prepare(`
     UPDATE matches SET td1 = ?, td2 = ?, cas1 = ?, cas2 = ?,
+      passes1 = ?, passes2 = ?, aggressions1 = ?, aggressions2 = ?,
       status = ?, notes = ?, played_at = CURRENT_TIMESTAMP
     WHERE id = ?
-  `).run(td1, td2, cas1, cas2, status, notes || null, req.params.id);
+  `).run(td1, td2, cas1, cas2, passes1, passes2, aggressions1, aggressions2,
+         status, notes || null, req.params.id);
   res.json(db.prepare('SELECT * FROM matches WHERE id = ?').get(req.params.id));
+});
+
+// Détail d'un match enrichi (équipes + rosters) pour le récap et le suivi live
+app.get('/api/matches/:id', (req, res) => {
+  const m = db.prepare(`
+    SELECT m.*,
+      tt.name AS tournament_name, tt.organizer_id AS organizer_id, tt.status AS tournament_status,
+      t1.name AS team1_name, t1.race AS team1_race, t1.coach_name AS team1_coach,
+      t1.team_value AS team1_tv, t1.roster_team_id AS team1_roster_id, t1.user_id AS team1_user,
+      t2.name AS team2_name, t2.race AS team2_race, t2.coach_name AS team2_coach,
+      t2.team_value AS team2_tv, t2.roster_team_id AS team2_roster_id, t2.user_id AS team2_user
+    FROM matches m
+    LEFT JOIN tournaments tt ON tt.id = m.tournament_id
+    LEFT JOIN teams t1 ON t1.id = m.team1_id
+    LEFT JOIN teams t2 ON t2.id = m.team2_id
+    WHERE m.id = ?
+  `).get(req.params.id);
+  if (!m) return res.status(404).json({ error: 'Match introuvable' });
+
+  const loadPlayers = (rosterId) => {
+    if (!rosterId) return [];
+    const players = db.prepare(`
+      SELECT number, position_title, player_name, ma, st, ag, pa, av, skills, extra_skills, cost,
+             stat_ma_bonus, stat_st_bonus, stat_ag_bonus, stat_pa_bonus, stat_av_bonus
+      FROM roster_players WHERE roster_team_id = ? AND dead = 0 ORDER BY number
+    `).all(rosterId);
+    for (const p of players) {
+      try { p.skills = p.skills ? JSON.parse(p.skills) : []; } catch { p.skills = []; }
+      try { p.extra_skills = p.extra_skills ? JSON.parse(p.extra_skills) : []; } catch { p.extra_skills = []; }
+    }
+    return players;
+  };
+  m.team1_players = loadPlayers(m.team1_roster_id);
+  m.team2_players = loadPlayers(m.team2_roster_id);
+  m.events = listMatchEvents(m.id);
+  res.json(m);
+});
+
+// Jet de météo (2d6), idempotent : ne lance qu'une fois par match
+app.post('/api/matches/:id/roll-weather', authMiddleware(), (req, res) => {
+  const match = db.prepare('SELECT * FROM matches WHERE id = ?').get(req.params.id);
+  if (!match) return res.status(404).json({ error: 'Match introuvable' });
+  if (!canManage(req, match.tournament_id) && !isMatchCoach(req, match)) {
+    return res.status(403).json({ error: 'Non autorisé' });
+  }
+  if (match.weather) {
+    return res.json({ weather: match.weather, d1: match.weather_d1, d2: match.weather_d2, already: true });
+  }
+  const d1 = 1 + Math.floor(Math.random() * 6);
+  const d2 = 1 + Math.floor(Math.random() * 6);
+  const weather = weatherFor(d1 + d2);
+  db.prepare('UPDATE matches SET weather = ?, weather_d1 = ?, weather_d2 = ? WHERE id = ?')
+    .run(weather, d1, d2, req.params.id);
+  logMatchEvent(req.params.id, 'weather', null, `Météo : ${weather} (dés ${d1} + ${d2} = ${d1 + d2})`);
+  res.json({ weather, d1, d2 });
+});
+
+// Mise à jour du suivi en direct (compteurs + compte-tours)
+app.patch('/api/matches/:id/live', authMiddleware(), (req, res) => {
+  const match = db.prepare('SELECT * FROM matches WHERE id = ?').get(req.params.id);
+  if (!match) return res.status(404).json({ error: 'Match introuvable' });
+  if (!canManage(req, match.tournament_id) && !isMatchCoach(req, match)) {
+    return res.status(403).json({ error: 'Non autorisé' });
+  }
+  const allowed = ['td1','td2','cas1','cas2','passes1','passes2','aggressions1','aggressions2',
+                   'half','turn1','turn2','active_team','turn_active'];
+  const fields = []; const values = [];
+  for (const k of allowed) {
+    if (k in req.body) {
+      const n = Number(req.body[k]);
+      if (!Number.isFinite(n) || n < 0) return res.status(400).json({ error: `Valeur invalide pour ${k}` });
+      fields.push(`${k} = ?`); values.push(Math.floor(n));
+    }
+  }
+  if (!fields.length) return res.status(400).json({ error: 'Rien à mettre à jour' });
+  // Dès qu'on touche au live, le match passe en cours (s'il était en attente)
+  if (match.status === 'pending') fields.push("status = 'in_progress'");
+  values.push(req.params.id);
+  db.prepare(`UPDATE matches SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+
+  // Journal d'évènements optionnel envoyé par le client
+  if (Array.isArray(req.body.log)) {
+    for (const ev of req.body.log) {
+      if (ev && ev.type) logMatchEvent(req.params.id, String(ev.type), ev.team_side ?? null, ev.detail || null);
+    }
+  }
+
+  const updated = db.prepare('SELECT * FROM matches WHERE id = ?').get(req.params.id);
+  updated.events = listMatchEvents(req.params.id);
+  res.json(updated);
 });
 
 // === Classement ===
@@ -323,13 +501,13 @@ app.get('/api/myteams/:id', authMiddleware(), (req, res) => {
 });
  
 app.post('/api/myteams', authMiddleware(), (req, res) => {
-  const { name, coach_name, race_key, treasury = 1000 } = req.body || {};
+  const { name, coach_name, race_key, treasury = 1000, naf_number } = req.body || {};
   if (!name || !race_key) return res.status(400).json({ error: 'name et race_key requis' });
   if (!ROSTERS[race_key]) return res.status(400).json({ error: 'Roster invalide' });
   const result = db.prepare(`
-    INSERT INTO roster_teams (user_id, name, coach_name, race_key, treasury, dedicated_fans)
-    VALUES (?, ?, ?, ?, ?, 1)
-  `).run(req.user.id, name, coach_name || null, race_key, treasury);
+    INSERT INTO roster_teams (user_id, name, coach_name, race_key, treasury, dedicated_fans, naf_number)
+    VALUES (?, ?, ?, ?, ?, 1, ?)
+  `).run(req.user.id, name, coach_name || null, race_key, treasury, naf_number || null);
   res.json({ id: result.lastInsertRowid });
 });
  
@@ -338,7 +516,7 @@ app.put('/api/myteams/:id', authMiddleware(), (req, res) => {
     .get(req.params.id, req.user.id);
   if (!team) return res.status(404).json({ error: 'Équipe introuvable' });
   const allowed = ['name','coach_name','treasury','rerolls','apothecary',
-                   'assistant_coaches','cheerleaders','dedicated_fans','notes'];
+                   'assistant_coaches','cheerleaders','dedicated_fans','notes','naf_number'];
   const fields = []; const values = [];
   for (const k of allowed) {
     if (k in req.body) { fields.push(`${k} = ?`); values.push(req.body[k]); }

@@ -148,4 +148,58 @@ if (!hasStatBoosts) {
   `);
 }
 
+// Migration : lien optionnel entre une équipe inscrite à un tournoi et
+// l'équipe « Mes équipes » (roster builder) dont elle est issue.
+const teamColumns = db.prepare("PRAGMA table_info(teams)").all();
+if (!teamColumns.some(c => c.name === 'roster_team_id')) {
+  console.log('🔄 Migration : ajout de teams.roster_team_id');
+  db.exec('ALTER TABLE teams ADD COLUMN roster_team_id INTEGER;');
+}
+
+// Migration : suivi "jour de match" en direct sur les matchs
+//   - compteurs supplémentaires : passes, agressions (TD et CAS existent déjà)
+//   - état du compte-tours : mi-temps, nb de tours par équipe, équipe active,
+//     et si un tour est en cours
+const matchColumns = db.prepare("PRAGMA table_info(matches)").all().map(c => c.name);
+const addMatchCol = (name, ddl) => {
+  if (!matchColumns.includes(name)) db.exec(`ALTER TABLE matches ADD COLUMN ${ddl};`);
+};
+if (!matchColumns.includes('passes1')) {
+  console.log('🔄 Migration : ajout du suivi de match en direct');
+}
+addMatchCol('passes1', 'passes1 INTEGER NOT NULL DEFAULT 0');
+addMatchCol('passes2', 'passes2 INTEGER NOT NULL DEFAULT 0');
+addMatchCol('aggressions1', 'aggressions1 INTEGER NOT NULL DEFAULT 0');
+addMatchCol('aggressions2', 'aggressions2 INTEGER NOT NULL DEFAULT 0');
+addMatchCol('half', 'half INTEGER NOT NULL DEFAULT 1');
+addMatchCol('turn1', 'turn1 INTEGER NOT NULL DEFAULT 0');
+addMatchCol('turn2', 'turn2 INTEGER NOT NULL DEFAULT 0');
+addMatchCol('active_team', 'active_team INTEGER NOT NULL DEFAULT 1');
+addMatchCol('turn_active', 'turn_active INTEGER NOT NULL DEFAULT 0');
+// Météo du match (2d6 lancés au coup d'envoi)
+addMatchCol('weather', 'weather TEXT');
+addMatchCol('weather_d1', 'weather_d1 INTEGER');
+addMatchCol('weather_d2', 'weather_d2 INTEGER');
+
+// Migration : numéro NAF (facultatif) du coach, rattaché à l'équipe
+const rosterTeamColumns = db.prepare("PRAGMA table_info(roster_teams)").all().map(c => c.name);
+if (!rosterTeamColumns.includes('naf_number')) {
+  console.log('🔄 Migration : ajout de roster_teams.naf_number');
+  db.exec('ALTER TABLE roster_teams ADD COLUMN naf_number TEXT;');
+}
+
+// Journal d'évènements d'un match (météo, tours, sorties, passes, agressions, TD)
+db.exec(`
+  CREATE TABLE IF NOT EXISTS match_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    match_id INTEGER NOT NULL,
+    type TEXT NOT NULL,        -- weather, turn, td, cas, passes, aggressions
+    team_side INTEGER,         -- 1, 2 ou NULL (évènement global)
+    detail TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (match_id) REFERENCES matches(id) ON DELETE CASCADE
+  );
+  CREATE INDEX IF NOT EXISTS idx_me_match ON match_events(match_id);
+`);
+
 export default db;
