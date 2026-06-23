@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Blood Bowl Manager</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;700;900&family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <div class="brand" data-route="home">
+        <span class="brand-icon">⚔</span>
+        <span class="brand-name">Blood Bowl <em>Manager</em></span>
+      </div>
+      <nav class="nav">
+        <a href="#/" data-route="home">Tournois</a>
+        <a href="#/new" data-route="new" data-auth>Nouveau</a>
+      </nav>
+      <div class="user-zone" id="userZone"></div>
+    </header>
+
+    <main id="view"></main>
+
+    <footer class="footer">
+      <span>Blood Bowl Manager · self-hosted · made for the dugout</span>
+    </footer>
+  </div>
+
+  <div id="modalRoot"></div>
+  <div id="toastRoot"></div>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
