@@ -902,7 +902,7 @@ async function renderMatchLive(view, matchId) {
 
   // Filet de sécurité : si la météo n'a pas été lancée (accès direct au live), on
   // la lance ici puis on recharge le match pour récupérer l'évènement météo.
-  if (!m.weather && editable) {
+  if ((!m.weather || m.pop1 == null) && editable) {
     try {
       await api('/matches/' + matchId + '/roll-weather', { method: 'POST' });
       m = await api('/matches/' + matchId);
@@ -915,7 +915,7 @@ async function renderMatchLive(view, matchId) {
   // Signature : ne re-render que si l'état (ou le journal) a vraiment changé.
   const signature = (x) => [
     x.td1, x.td2, x.cas1, x.cas2, x.passes1, x.passes2, x.aggressions1, x.aggressions2,
-    x.half, x.turn1, x.turn2, x.active_team, x.turn_active, x.status, x.weather,
+    x.half, x.turn1, x.turn2, x.active_team, x.turn_active, x.status, x.weather, x.pop1,
     (x.events ? x.events.length : 0),
   ].join('|');
   let lastSig = signature(m);
@@ -935,14 +935,48 @@ async function renderMatchLive(view, matchId) {
   };
 
   const STAT_LABELS = { td: 'Touchdown', cas: 'Sortie', passes: 'Passe', aggressions: 'Agression' };
-  const bump = (base, side, delta) => {
+  const playerLabel = (p) => `#${p.number} ${p.position_title}${p.player_name ? ' · ' + p.player_name : ''}`;
+
+  // Applique +1 sur une stat et journalise (avec le joueur si fourni)
+  const applyStat = (base, side, player) => {
+    const field = base + side;
+    const detail = player
+      ? `${STAT_LABELS[base]} — ${playerLabel(player)}`
+      : `${STAT_LABELS[base]} — ${m[`team${side}_name`]}`;
+    patchLive({ [field]: (m[field] || 0) + 1 }, [{ type: base, team_side: side, detail }]);
+  };
+
+  // Retrait (correction) : on décrémente sans journaliser
+  const removeStat = (base, side) => {
     if (!editable) return;
     const field = base + side;
-    // On ne journalise que les ajouts (les retraits sont des corrections)
-    const log = delta > 0
-      ? [{ type: base, team_side: side, detail: `${STAT_LABELS[base]} — ${m[`team${side}_name`]}` }]
-      : undefined;
-    patchLive({ [field]: Math.max(0, (m[field] || 0) + delta) }, log);
+    patchLive({ [field]: Math.max(0, (m[field] || 0) - 1) });
+  };
+
+  // Modale de sélection du joueur auteur de l'action
+  const pickPlayerForStat = (base, side) => {
+    if (!editable) return;
+    const players = m[`team${side}_players`] || [];
+    if (!players.length) { applyStat(base, side, null); return; } // pas de roster lié
+    const wrap = el('div', {},
+      el('h2', {}, `${STAT_LABELS[base]} — ${m[`team${side}_name`]}`),
+      el('div', { style: 'color:var(--text-dim); font-size:13px; margin-bottom:14px;' },
+        'À quel joueur attribuer cette action ?'),
+    );
+    const list = el('div', { style: 'display:flex; flex-direction:column; gap:6px; max-height:50vh; overflow-y:auto;' });
+    for (const p of players) {
+      list.appendChild(el('button', {
+        class: 'btn',
+        style: 'justify-content:flex-start; text-align:left;',
+        onclick: () => { closeModal(); applyStat(base, side, p); },
+      }, playerLabel(p)));
+    }
+    wrap.appendChild(list);
+    wrap.appendChild(el('div', { class: 'modal-actions', style: 'margin-top:14px;' },
+      el('button', { class: 'btn btn-ghost', onclick: closeModal }, 'Annuler'),
+      el('button', { class: 'btn btn-ghost', onclick: () => { closeModal(); applyStat(base, side, null); } }, 'Sans joueur'),
+    ));
+    openModal(wrap);
   };
 
   const toggleTurn = () => {
@@ -969,10 +1003,11 @@ async function renderMatchLive(view, matchId) {
       return;
     }
     if (halfOver && m.half === 1) {
-      // Fin de la 1re mi-temps -> on enchaîne sur la 2e, l'équipe 1 démarre
-      patchLive({ half: 2, turn1: 1, turn2: 0, active_team: 1, turn_active: 1 }, [
+      // BB : l'équipe qui a commencé la 1re MT ne commence pas la 2e.
+      // L'équipe 1 a démarré le match -> l'équipe 2 lance la 2e mi-temps.
+      patchLive({ half: 2, turn1: 0, turn2: 1, active_team: 2, turn_active: 1 }, [
         { type: 'turn', team_side: null, detail: '— Mi-temps 2 —' },
-        { type: 'turn', team_side: 1, detail: `Tour ${globalTurn(2, 1)} — ${m.team1_name}` },
+        { type: 'turn', team_side: 2, detail: `Tour ${globalTurn(2, 1)} — ${m.team2_name}` },
       ]);
       return;
     }
@@ -1005,9 +1040,9 @@ async function renderMatchLive(view, matchId) {
     return el('div', { style: 'display:flex; align-items:center; justify-content:space-between; gap:10px; padding:8px 0; border-bottom:1px solid var(--line);' },
       el('span', { style: 'font-size:13px; color:var(--text-dim);' }, label),
       el('div', { style: 'display:flex; align-items:center; gap:10px;' },
-        editable ? el('button', { class: 'btn btn-sm', onclick: () => bump(field, side, -1) }, '−') : null,
+        editable ? el('button', { class: 'btn btn-sm', onclick: () => removeStat(field, side) }, '−') : null,
         el('span', { style: 'font-family:var(--font-mono); font-weight:700; min-width:28px; text-align:center; color:var(--netblitz-yellow); font-size:18px;' }, String(m[f] || 0)),
-        editable ? el('button', { class: 'btn btn-primary btn-sm', onclick: () => bump(field, side, 1) }, '+') : null,
+        editable ? el('button', { class: 'btn btn-primary btn-sm', onclick: () => pickPlayerForStat(field, side) }, '+') : null,
       ),
     );
   };
@@ -1031,15 +1066,18 @@ async function renderMatchLive(view, matchId) {
   // pour rester synchronisé (l'équipe 1 mène toujours l'ordre des tours).
   const goToTurn = (side, turnNum) => {
     if (!editable) return;
+    // L'équipe 1 mène la 1re mi-temps, l'équipe 2 mène la 2e (elle a le coup d'envoi).
+    const leader = m.half >= 2 ? 2 : 1;
+    const follower = leader === 1 ? 2 : 1;
     const patch = { active_team: side, turn_active: 1 };
-    if (side === 1) {
-      // Équipe 1 sur le tour N -> l'équipe 2 a terminé le tour N-1
-      patch.turn1 = turnNum;
-      patch.turn2 = Math.max(0, turnNum - 1);
+    if (side === leader) {
+      // Le meneur est sur le tour N -> le suiveur a terminé le tour N-1
+      patch[`turn${leader}`] = turnNum;
+      patch[`turn${follower}`] = Math.max(0, turnNum - 1);
     } else {
-      // Équipe 2 sur le tour N -> l'équipe 1 a déjà joué son tour N
-      patch.turn2 = turnNum;
-      patch.turn1 = turnNum;
+      // Le suiveur est sur le tour N -> le meneur a déjà joué son tour N
+      patch[`turn${follower}`] = turnNum;
+      patch[`turn${leader}`] = turnNum;
     }
     patchLive(patch, [{ type: 'turn', team_side: side,
       detail: `Retour au tour ${globalTurn(m.half, turnNum)} — ${m[`team${side}_name`]}` }]);
@@ -1075,34 +1113,37 @@ async function renderMatchLive(view, matchId) {
     return row;
   };
 
-  const WEATHER_ICON = { 'Canicule': '🔥', 'Très ensoleillé': '☀️', 'Météo clémente': '🌤️', 'Averse': '🌧️', 'Blizzard': '❄️' };
-  const weatherBanner = () => {
-    if (!m.weather) return null;
-    const sum = (m.weather_d1 || 0) + (m.weather_d2 || 0);
-    return el('div', { style: 'text-align:center; margin:0 0 14px; font-family:var(--font-mono); font-size:14px; color:var(--bone);' },
-      `${WEATHER_ICON[m.weather] || '🌦️'} Météo : `,
-      el('strong', { style: 'color:var(--netblitz-yellow);' }, m.weather),
-      `  ·  🎲 ${m.weather_d1} + ${m.weather_d2} = ${sum}`,
-    );
-  };
-
-  const EVENT_ICON = { weather: '🌦️', turn: '⏱️', td: '🏈', cas: '💀', passes: '🎯', aggressions: '👊' };
+  // Historique des actions de jeu (+ météo, popularité) : TD, sorties, passes, agressions
+  const ACTION_TYPES = ['weather', 'popularity', 'td', 'cas', 'passes', 'aggressions'];
+  const EVENT_ICON = { weather: '🌦️', popularity: '📣', td: '🏈', cas: '💀', passes: '🎯', aggressions: '👊' };
   const historyCard = () => {
-    const events = m.events || [];
-    const card = el('div', { class: 'card', style: 'margin-top:28px;' });
-    card.appendChild(el('h3', { style: 'font-family:var(--font-display); letter-spacing:0.08em; text-transform:uppercase; color:var(--gold); margin:0 0 12px;' },
-      'Historique du match'));
+    const events = (m.events || []).filter(ev => ACTION_TYPES.includes(ev.type));
+    const card = el('div', { class: 'card', style: 'margin:24px auto; max-width:560px;' });
+    card.appendChild(el('h3', { style: 'font-family:var(--font-display); letter-spacing:0.08em; text-transform:uppercase; color:var(--gold); margin:0 0 12px; text-align:center;' },
+      'Historique des actions'));
     if (!events.length) {
-      card.appendChild(el('div', { style: 'color:var(--text-faint); font-size:13px;' }, 'Aucun évènement pour le moment.'));
+      card.appendChild(el('div', { style: 'color:var(--text-faint); font-size:13px; text-align:center;' }, 'Aucune action pour le moment.'));
       return card;
     }
-    const list = el('div', { style: 'max-height:320px; overflow-y:auto;' });
+    const list = el('div', { style: 'max-height:300px; overflow-y:auto;' });
     [...events].reverse().forEach(ev => {
-      list.appendChild(el('div', { style: 'display:flex; gap:10px; align-items:center; padding:6px 2px; border-bottom:1px solid var(--line); font-size:13px;' },
-        el('span', { style: 'font-size:16px;' }, EVENT_ICON[ev.type] || '•'),
-        el('span', { style: 'flex:1; color:var(--bone);' }, ev.detail || ev.type),
-        el('span', { style: 'font-family:var(--font-mono); color:var(--text-faint); font-size:11px;' }, fmtTime(ev.created_at)),
-      ));
+      const global = ev.team_side == null;  // météo / évènement global
+      const right = ev.team_side === 2;     // coach de droite
+      const turnEl = ev.turn
+        ? el('span', { style: 'font-family:var(--font-mono); color:var(--netblitz-yellow); font-size:11px; white-space:nowrap;' }, `Tour ${ev.turn}`)
+        : null;
+      const iconEl = el('span', { style: 'font-size:16px;' }, EVENT_ICON[ev.type] || '•');
+      const detailEl = el('span', { style: global ? 'color:var(--text-dim); font-style:italic;' : 'color:var(--bone);' },
+        ev.detail || ev.type);
+      // Météo : centrée, sans tour. Équipe 2 : à droite. Équipe 1 : à gauche.
+      let parts, justify;
+      if (global) { parts = [iconEl, detailEl]; justify = 'center'; }
+      else if (right) { parts = [turnEl, detailEl, iconEl]; justify = 'flex-end'; }
+      else { parts = [iconEl, detailEl, turnEl]; justify = 'flex-start'; }
+      list.appendChild(el('div', {
+        style: 'display:flex; align-items:center; gap:8px; padding:5px 4px; font-size:13px; border-bottom:1px solid var(--line);'
+          + ` justify-content:${justify};`,
+      }, ...parts));
     });
     card.appendChild(list);
     return card;
@@ -1135,10 +1176,6 @@ async function renderMatchLive(view, matchId) {
       ),
     ));
 
-    // Météo (résultat des dés)
-    const wb = weatherBanner();
-    if (wb) view.appendChild(wb);
-
     // Compte-tours
     if (!matchComplete) {
       view.appendChild(el('div', { style: 'text-align:center; margin:20px 0;' },
@@ -1154,6 +1191,9 @@ async function renderMatchLive(view, matchId) {
       view.appendChild(el('div', { style: 'text-align:center; margin:20px 0; color:var(--moss, #4a7c2a); font-weight:700;' },
         '✓ Les deux mi-temps (8 tours) sont jouées'));
     }
+
+    // Historique des actions — au milieu de la page
+    view.appendChild(historyCard());
 
     // Cartes stats par équipe
     view.appendChild(el('div', { style: 'display:flex; gap:20px; flex-wrap:wrap; margin-top:8px;' },
@@ -1179,9 +1219,6 @@ async function renderMatchLive(view, matchId) {
       view.appendChild(el('div', { style: 'text-align:center; margin-top:20px; color:var(--text-faint); font-size:13px;' },
         'Vue spectateur — seuls les coachs peuvent modifier le match.'));
     }
-
-    // Historique des évènements du match
-    view.appendChild(historyCard());
   }
 
   render();

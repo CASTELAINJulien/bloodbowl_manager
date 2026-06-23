@@ -150,9 +150,26 @@ function listMatchEvents(matchId) {
   return db.prepare('SELECT * FROM match_events WHERE match_id = ? ORDER BY id').all(matchId);
 }
 
-function logMatchEvent(matchId, type, teamSide, detail) {
-  db.prepare('INSERT INTO match_events (match_id, type, team_side, detail) VALUES (?, ?, ?, ?)')
-    .run(matchId, type, teamSide ?? null, detail || null);
+// Tour global (1..16) déduit de l'état du match ; 0 avant le coup d'envoi
+function currentGlobalTurn(match) {
+  const t = match.active_team === 1 ? (match.turn1 || 0) : (match.turn2 || 0);
+  return (Math.max(1, match.half || 1) - 1) * 8 + t;
+}
+
+function logMatchEvent(matchId, type, teamSide, detail, turn = null) {
+  db.prepare('INSERT INTO match_events (match_id, type, team_side, detail, turn) VALUES (?, ?, ?, ?, ?)')
+    .run(matchId, type, teamSide ?? null, detail || null, turn ?? null);
+}
+
+// Nombre de fans dédiés d'une équipe inscrite (via son roster lié), défaut 1
+function teamFans(teamId) {
+  if (!teamId) return 1;
+  const tm = db.prepare('SELECT roster_team_id FROM teams WHERE id = ?').get(teamId);
+  if (tm && tm.roster_team_id) {
+    const rt = db.prepare('SELECT dedicated_fans FROM roster_teams WHERE id = ?').get(tm.roster_team_id);
+    if (rt && rt.dedicated_fans != null) return rt.dedicated_fans;
+  }
+  return 1;
 }
 
 // Valeur d'équipe (en or complet) calculée depuis le roster builder, avec la
@@ -389,16 +406,31 @@ app.post('/api/matches/:id/roll-weather', authMiddleware(), (req, res) => {
   if (!canManage(req, match.tournament_id) && !isMatchCoach(req, match)) {
     return res.status(403).json({ error: 'Non autorisé' });
   }
-  if (match.weather) {
-    return res.json({ weather: match.weather, d1: match.weather_d1, d2: match.weather_d2, already: true });
+  // Météo (2d6) — lancée une seule fois
+  if (!match.weather) {
+    const d1 = 1 + Math.floor(Math.random() * 6);
+    const d2 = 1 + Math.floor(Math.random() * 6);
+    const weather = weatherFor(d1 + d2);
+    db.prepare('UPDATE matches SET weather = ?, weather_d1 = ?, weather_d2 = ? WHERE id = ?')
+      .run(weather, d1, d2, req.params.id);
+    logMatchEvent(req.params.id, 'weather', null, `Météo : ${weather} (dés ${d1} + ${d2} = ${d1 + d2})`, 0);
   }
-  const d1 = 1 + Math.floor(Math.random() * 6);
-  const d2 = 1 + Math.floor(Math.random() * 6);
-  const weather = weatherFor(d1 + d2);
-  db.prepare('UPDATE matches SET weather = ?, weather_d1 = ?, weather_d2 = ? WHERE id = ?')
-    .run(weather, d1, d2, req.params.id);
-  logMatchEvent(req.params.id, 'weather', null, `Météo : ${weather} (dés ${d1} + ${d2} = ${d1 + d2})`);
-  res.json({ weather, d1, d2 });
+
+  // Popularité de chaque équipe (dedicated fans + 1 D3) — lancée une seule fois
+  if (match.pop1 == null) {
+    for (const side of [1, 2]) {
+      const fans = teamFans(side === 1 ? match.team1_id : match.team2_id);
+      const d3 = 1 + Math.floor(Math.random() * 3);
+      const pop = fans + d3;
+      db.prepare(`UPDATE matches SET pop${side} = ?, pop${side}_d3 = ? WHERE id = ?`).run(pop, d3, req.params.id);
+      logMatchEvent(req.params.id, 'popularity', side,
+        `Popularité : ${fans} fan${fans > 1 ? 's' : ''} + ${d3} = ${pop}`, 0);
+    }
+  }
+
+  const m2 = db.prepare('SELECT weather, weather_d1, weather_d2, pop1, pop1_d3, pop2, pop2_d3 FROM matches WHERE id = ?')
+    .get(req.params.id);
+  res.json(m2);
 });
 
 // Mise à jour du suivi en direct (compteurs + compte-tours)
@@ -423,15 +455,16 @@ app.patch('/api/matches/:id/live', authMiddleware(), (req, res) => {
   if (match.status === 'pending') fields.push("status = 'in_progress'");
   values.push(req.params.id);
   db.prepare(`UPDATE matches SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+  const updated = db.prepare('SELECT * FROM matches WHERE id = ?').get(req.params.id);
 
-  // Journal d'évènements optionnel envoyé par le client
+  // Journal d'évènements optionnel envoyé par le client (tour calculé côté serveur)
   if (Array.isArray(req.body.log)) {
+    const turn = currentGlobalTurn(updated);
     for (const ev of req.body.log) {
-      if (ev && ev.type) logMatchEvent(req.params.id, String(ev.type), ev.team_side ?? null, ev.detail || null);
+      if (ev && ev.type) logMatchEvent(req.params.id, String(ev.type), ev.team_side ?? null, ev.detail || null, turn);
     }
   }
 
-  const updated = db.prepare('SELECT * FROM matches WHERE id = ?').get(req.params.id);
   updated.events = listMatchEvents(req.params.id);
   res.json(updated);
 });

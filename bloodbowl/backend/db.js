@@ -180,6 +180,11 @@ addMatchCol('turn_active', 'turn_active INTEGER NOT NULL DEFAULT 0');
 addMatchCol('weather', 'weather TEXT');
 addMatchCol('weather_d1', 'weather_d1 INTEGER');
 addMatchCol('weather_d2', 'weather_d2 INTEGER');
+// Popularité de chaque équipe (dedicated fans + 1 D3)
+addMatchCol('pop1', 'pop1 INTEGER');
+addMatchCol('pop1_d3', 'pop1_d3 INTEGER');
+addMatchCol('pop2', 'pop2 INTEGER');
+addMatchCol('pop2_d3', 'pop2_d3 INTEGER');
 
 // Migration : numéro NAF (facultatif) du coach, rattaché à l'équipe
 const rosterTeamColumns = db.prepare("PRAGMA table_info(roster_teams)").all().map(c => c.name);
@@ -196,10 +201,16 @@ db.exec(`
     type TEXT NOT NULL,        -- weather, turn, td, cas, passes, aggressions
     team_side INTEGER,         -- 1, 2 ou NULL (évènement global)
     detail TEXT,
+    turn INTEGER,              -- tour global (1..16) au moment de l'évènement
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (match_id) REFERENCES matches(id) ON DELETE CASCADE
   );
   CREATE INDEX IF NOT EXISTS idx_me_match ON match_events(match_id);
 `);
+// Migration : colonne turn pour les tables match_events déjà créées
+const meCols = db.prepare("PRAGMA table_info(match_events)").all().map(c => c.name);
+if (!meCols.includes('turn')) {
+  db.exec('ALTER TABLE match_events ADD COLUMN turn INTEGER;');
+}
 
 export default db;
