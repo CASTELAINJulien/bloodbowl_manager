@@ -48,6 +48,33 @@ const fmtTime = (s) => {
   return isNaN(d) ? '' : d.toLocaleTimeString('fr-FR');
 };
 
+// Lit un fichier image, le redimensionne (max maxSize px) et renvoie une data URL PNG
+function readImageAsDataURL(file, maxSize = 256) {
+  return new Promise((resolve, reject) => {
+    if (!file.type || !file.type.startsWith('image/')) { reject(new Error('Veuillez choisir un fichier image')); return; }
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Lecture du fichier échouée'));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error('Image invalide'));
+      img.onload = () => {
+        let { width, height } = img;
+        if (width > maxSize || height > maxSize) {
+          const scale = maxSize / Math.max(width, height);
+          width = Math.round(width * scale);
+          height = Math.round(height * scale);
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = width; canvas.height = height;
+        canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL('image/png'));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
 const STATUS_LABELS = {
   draft: 'Brouillon',
   registration: 'Inscriptions',
@@ -124,6 +151,30 @@ function renderUserZone() {
     zone.appendChild(el('button', { class: 'btn btn-sm', onclick: showLogin }, 'Connexion'));
     zone.appendChild(el('button', { class: 'btn btn-gold btn-sm', onclick: showRegister }, 'Inscription'));
   }
+
+  const nav = $('.nav');
+
+  // Lien "Mon profil" : visible pour tout utilisateur connecté
+  let profileLink = $('.nav a[data-route="profile"]');
+  if (state.user) {
+    if (!profileLink) {
+      profileLink = el('a', { href: '#/profile', 'data-route': 'profile' }, 'Mon profil');
+      nav.appendChild(profileLink);
+    }
+  } else if (profileLink) {
+    profileLink.remove();
+  }
+
+  // Lien "Administration" dans la nav : visible uniquement pour les admins
+  let adminLink = $('.nav a[data-route="admin"]');
+  if (state.user && state.user.is_admin) {
+    if (!adminLink) {
+      adminLink = el('a', { href: '#/admin', 'data-route': 'admin' }, 'Administration');
+      nav.appendChild(adminLink);
+    }
+  } else if (adminLink) {
+    adminLink.remove();
+  }
 }
 
 function showLogin() {
@@ -151,9 +202,33 @@ function showLogin() {
     el('div', { class: 'modal-actions' },
       el('button', { type: 'button', class: 'btn btn-ghost', onclick: closeModal }, 'Annuler'),
       el('button', { type: 'submit', class: 'btn btn-primary' }, 'Connexion')),
+    el('div', { style: 'text-align:center; margin-top:14px;' },
+      el('a', { href: '#', style: 'color:var(--text-dim); font-size:13px;',
+        onclick: (e) => { e.preventDefault(); closeModal(); showForgotPassword(); } }, 'Mot de passe oublié ?')),
   );
   const wrap = el('div', {}, el('h2', {}, 'Connexion'), form);
   openModal(wrap);
+}
+
+function showForgotPassword() {
+  const form = el('form', { class: 'form', onsubmit: async (e) => {
+    e.preventDefault();
+    const fd = new FormData(form);
+    try {
+      await api('/auth/forgot-password', { method: 'POST', body: JSON.stringify({ identifier: fd.get('identifier') }) });
+      closeModal();
+      toast("Demande envoyée. Contactez l'administrateur pour récupérer votre accès.", 'success');
+    } catch (err) { toast(err.message, 'error'); }
+  }},
+    el('div', { style: 'color:var(--text-dim); font-size:13px; margin-bottom:14px;' },
+      "Saisissez votre nom d'utilisateur ou votre email. Une demande sera transmise à l'administrateur, qui vous communiquera un mot de passe temporaire."),
+    el('div', { class: 'field' }, el('label', {}, "Nom d'utilisateur ou email"),
+      el('input', { name: 'identifier', required: true })),
+    el('div', { class: 'modal-actions' },
+      el('button', { type: 'button', class: 'btn btn-ghost', onclick: () => { closeModal(); showLogin(); } }, 'Retour'),
+      el('button', { type: 'submit', class: 'btn btn-primary' }, 'Envoyer la demande')),
+  );
+  openModal(el('div', {}, el('h2', {}, 'Mot de passe oublié'), form));
 }
 
 function showRegister() {
@@ -240,6 +315,12 @@ async function renderRoute() {
       await renderMyTeams(view);
     } else if (segments[0] === 'myteams' && segments[1]) {
       await renderTeamBuilder(view, segments[1]);
+    } else if (segments[0] === 'profile') {
+      $$('.nav a[data-route="profile"]').forEach(a => a.classList.add('active'));
+      await renderProfile(view);
+    } else if (segments[0] === 'admin') {
+      $$('.nav a[data-route="admin"]').forEach(a => a.classList.add('active'));
+      await renderAdmin(view);
     } else if (segments[0] === 'match' && segments[1] && segments[2] === 'live') {
       await renderMatchLive(view, segments[1]);
     } else if (segments[0] === 'match' && segments[1]) {
@@ -449,6 +530,7 @@ async function renderTournament(view, id, tab) {
     ['teams', `Équipes (${teams.length})`],
     ['matches', 'Matchs'],
     ['standings', 'Classement'],
+    ['stats', 'Statistiques'],
   ];
   for (const [k, label] of tabsCfg) {
     tabs.appendChild(el('button', {
@@ -465,6 +547,63 @@ async function renderTournament(view, id, tab) {
   else if (tab === 'teams') renderTeams(content, t, teams, isOrganizer);
   else if (tab === 'matches') renderMatches(content, t, teams, matches, isOrganizer);
   else if (tab === 'standings') renderStandings(content, standings);
+  else if (tab === 'stats') renderStats(content, t);
+}
+
+// --- Graphique en barres horizontales (sans dépendance) ---
+function hBarChart(items, color) {
+  const max = Math.max(1, ...items.map(i => i.value || 0));
+  const wrap = el('div', { style: 'display:flex; flex-direction:column; gap:8px;' });
+  for (const it of items) {
+    const pct = Math.round(((it.value || 0) / max) * 100);
+    wrap.appendChild(el('div', { style: 'display:flex; align-items:center; gap:10px;' },
+      el('span', { style: 'flex:0 0 150px; font-size:13px; color:var(--text-dim); text-align:right; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;' }, it.label),
+      el('div', { style: 'flex:1; background:rgba(255,255,255,0.05); border-radius:5px; overflow:hidden; height:22px;' },
+        el('div', { style: `width:${pct}%; min-width:2px; height:100%; background:${color || 'var(--netblitz-yellow)'};` })),
+      el('span', { style: 'flex:0 0 36px; font-family:var(--font-mono); font-weight:700; color:var(--bone); text-align:right;' }, String(it.value || 0)),
+    ));
+  }
+  return wrap;
+}
+
+// --- Statistiques ---
+async function renderStats(root, t) {
+  root.innerHTML = '<div class="empty">Chargement…</div>';
+  let stats;
+  try { stats = await api('/tournaments/' + t.id + '/stats'); }
+  catch (err) { root.innerHTML = `<div class="empty">${escape(err.message)}</div>`; return; }
+  root.innerHTML = '';
+
+  const sectionTitle = (txt, mt) => el('h3', {
+    style: `font-family:var(--font-display); letter-spacing:0.08em; text-transform:uppercase; color:var(--gold); margin:${mt || 0} 0 16px;`,
+  }, txt);
+
+  // Cartes des totaux
+  root.appendChild(el('div', { class: 'tournaments-grid', style: 'margin-bottom:32px;' },
+    statCard('🏈 Touchdowns', stats.totals.td, ''),
+    statCard('💀 Sorties', stats.totals.cas, ''),
+    statCard('🎯 Passes', stats.totals.passes, ''),
+    statCard('👊 Agressions', stats.totals.aggressions, ''),
+  ));
+  root.appendChild(el('div', { style: 'color:var(--text-faint); font-size:12px; margin:-20px 0 24px;' },
+    `${stats.matches_played} match${stats.matches_played > 1 ? 's' : ''} terminé${stats.matches_played > 1 ? 's' : ''} pris en compte`));
+
+  // Graphique : répartition des races
+  root.appendChild(sectionTitle('Races jouées'));
+  if (stats.races.length) {
+    root.appendChild(hBarChart(stats.races.map(r => ({ label: r.race, value: r.count })), 'var(--gold)'));
+  } else {
+    root.appendChild(el('div', { class: 'empty' }, 'Aucune équipe inscrite.'));
+  }
+
+  // Graphique : actions du tournoi
+  root.appendChild(sectionTitle('Actions du tournoi', '36px'));
+  root.appendChild(hBarChart([
+    { label: '🏈 Touchdowns', value: stats.totals.td },
+    { label: '💀 Sorties', value: stats.totals.cas },
+    { label: '🎯 Passes', value: stats.totals.passes },
+    { label: '👊 Agressions', value: stats.totals.aggressions },
+  ], 'var(--blood-bright)'));
 }
 
 // --- Vue d'ensemble ---
@@ -580,7 +719,10 @@ function renderTeams(root, t, teams, isOrganizer) {
   for (const team of teams) {
     const canEdit = state.user && (isOrganizer || state.user.id === team.user_id);
     tbody.appendChild(el('tr', {},
-      el('td', { style: 'font-weight:600; color:var(--bone);' }, team.name),
+      el('td', {}, el('div', { style: 'display:flex; align-items:center; gap:8px;' },
+        team.logo_url ? el('img', { src: team.logo_url, alt: '', style: 'width:24px; height:24px; object-fit:contain; border-radius:4px; flex:none;' }) : null,
+        el('span', { style: 'font-weight:600; color:var(--bone);' }, team.name),
+      )),
       el('td', {}, team.coach_name),
       el('td', {}, team.race),
       el('td', { class: 'td-num' }, String(team.team_value || '—')),
@@ -798,10 +940,14 @@ function teamRecapPanel(m, side) {
   const coach = m[`team${side}_coach`] || '';
   const race = m[`team${side}_race`] || '';
   const tv = m[`team${side}_tv`];
+  const logo = m[`team${side}_logo`];
   const players = m[`team${side}_players`] || [];
 
   const panel = el('div', { class: 'card', style: 'flex:1; min-width:280px;' },
-    el('div', { style: 'font-family:var(--font-display); font-size:24px; font-weight:900; color:var(--netblitz-yellow);' }, name),
+    el('div', { style: 'display:flex; align-items:center; gap:12px;' },
+      logo ? el('img', { src: logo, alt: '', style: 'width:48px; height:48px; object-fit:contain; border-radius:8px; flex:none;' }) : null,
+      el('div', { style: 'font-family:var(--font-display); font-size:24px; font-weight:900; color:var(--netblitz-yellow);' }, name),
+    ),
     el('div', { class: 'meta', style: 'margin:6px 0 14px;' },
       el('span', {}, '◆ ' + coach),
       el('span', {}, '◆ ' + race),
@@ -1164,12 +1310,14 @@ async function renderMatchLive(view, matchId) {
         `Mi-temps ${m.half} / 2`),
       el('div', { style: 'display:flex; align-items:flex-start; justify-content:center; gap:24px; margin-top:8px;' },
         el('div', { style: 'display:flex; flex-direction:column; align-items:center; max-width:320px;' },
+          m.team1_logo ? el('img', { src: m.team1_logo, alt: '', style: 'width:40px; height:40px; object-fit:contain; border-radius:6px; margin-bottom:4px;' }) : null,
           el('span', { style: 'font-family:var(--font-display); font-size:22px; color:#fff;' }, m.team1_name),
           teamTurnBoxes(1),
         ),
         el('span', { style: 'font-family:var(--font-display); font-size:48px; font-weight:900; color:var(--netblitz-yellow); line-height:1;' },
           `${m.td1 || 0} - ${m.td2 || 0}`),
         el('div', { style: 'display:flex; flex-direction:column; align-items:center; max-width:320px;' },
+          m.team2_logo ? el('img', { src: m.team2_logo, alt: '', style: 'width:40px; height:40px; object-fit:contain; border-radius:6px; margin-bottom:4px;' }) : null,
           el('span', { style: 'font-family:var(--font-display); font-size:22px; color:#fff;' }, m.team2_name),
           teamTurnBoxes(2),
         ),
@@ -1393,9 +1541,12 @@ async function renderMyTeams(view) {
       class: 'card card-link t-card',
       onclick: () => navigate('myteams', { id: t.id }),
     },
-      el('div', { style: 'display:flex; justify-content:space-between; gap:12px;' },
-        el('h3', { class: 't-name' }, t.name),
-        el('span', { class: 'badge', style: 'color:var(--netblitz-yellow); border-color:var(--netblitz-yellow);' },
+      el('div', { style: 'display:flex; justify-content:space-between; gap:12px; align-items:center;' },
+        el('div', { style: 'display:flex; align-items:center; gap:10px; min-width:0;' },
+          t.logo ? el('img', { src: t.logo, alt: '', style: 'width:36px; height:36px; object-fit:contain; border-radius:6px; flex:none;' }) : null,
+          el('h3', { class: 't-name' }, t.name),
+        ),
+        el('span', { class: 'badge', style: 'color:var(--netblitz-yellow); border-color:var(--netblitz-yellow); flex:none;' },
           rosters.find(r => r.key === t.race_key)?.name || t.race_key),
       ),
       (t.coach_name || t.naf_number) ? el('div', { class: 't-meta' },
@@ -1416,6 +1567,16 @@ async function renderMyTeams(view) {
 }
  
 function showCreateTeamModal(rosters) {
+  let logoData = null;
+  const preview = el('img', { style: 'display:none; width:72px; height:72px; object-fit:contain; border-radius:8px; border:1px solid var(--line); margin-top:8px; background:rgba(255,255,255,0.04);' });
+  const fileInput = el('input', { type: 'file', accept: 'image/*', onchange: async (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    try {
+      logoData = await readImageAsDataURL(file);
+      preview.src = logoData; preview.style.display = 'block';
+    } catch (err) { toast(err.message, 'error'); }
+  }});
   const form = el('form', { class: 'form', onsubmit: async (e) => {
     e.preventDefault();
     const fd = new FormData(form);
@@ -1428,6 +1589,7 @@ function showCreateTeamModal(rosters) {
           race_key: fd.get('race_key'),
           treasury: parseInt(fd.get('treasury')) || 1000,
           naf_number: (fd.get('naf_number') || '').trim() || null,
+          logo: logoData,
         }),
       });
       toast('Équipe créée', 'success');
@@ -1453,13 +1615,49 @@ function showCreateTeamModal(rosters) {
     ),
     el('div', { class: 'field' }, el('label', {}, 'Trésorerie de départ (k)'),
       el('input', { name: 'treasury', type: 'number', min: 0, step: 5, value: 1000 })),
+    el('div', { class: 'field' }, el('label', {}, 'Logo (facultatif)'), fileInput, preview),
     el('div', { class: 'modal-actions' },
       el('button', { type: 'button', class: 'btn btn-ghost', onclick: closeModal }, 'Annuler'),
       el('button', { type: 'submit', class: 'btn btn-primary' }, 'Créer')),
   );
   openModal(el('div', {}, el('h2', {}, 'Nouvelle équipe'), form));
 }
- 
+
+// Modale d'ajout / modification / retrait du logo d'une équipe existante
+function showLogoModal(team) {
+  let logoData = team.logo || null;
+  const preview = el('img', {
+    src: logoData || '',
+    style: `${logoData ? '' : 'display:none;'} width:96px; height:96px; object-fit:contain; border-radius:10px; border:1px solid var(--line); background:rgba(255,255,255,0.04);`,
+  });
+  const fileInput = el('input', { type: 'file', accept: 'image/*', onchange: async (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    try {
+      logoData = await readImageAsDataURL(file);
+      preview.src = logoData; preview.style.display = 'block';
+    } catch (err) { toast(err.message, 'error'); }
+  }});
+  const save = async (value) => {
+    try {
+      await api('/myteams/' + team.id, { method: 'PUT', body: JSON.stringify({ logo: value }) });
+      toast('Logo mis à jour', 'success');
+      closeModal();
+      renderRoute();
+    } catch (err) { toast(err.message, 'error'); }
+  };
+  openModal(el('div', {},
+    el('h2', {}, "Logo de l'équipe"),
+    el('div', { style: 'display:flex; justify-content:center; margin-bottom:14px;' }, preview),
+    el('div', { class: 'field' }, el('label', {}, 'Choisir une image'), fileInput),
+    el('div', { class: 'modal-actions' },
+      el('button', { class: 'btn btn-ghost', onclick: closeModal }, 'Annuler'),
+      team.logo ? el('button', { class: 'btn btn-danger', onclick: () => save(null) }, 'Retirer') : null,
+      el('button', { class: 'btn btn-primary', onclick: () => save(logoData) }, 'Enregistrer'),
+    ),
+  ));
+}
+
 // --- Team Builder : éditeur d'une équipe ---
 async function renderTeamBuilder(view, teamId) {
   const team = await api('/myteams/' + teamId);
@@ -1470,6 +1668,12 @@ async function renderTeamBuilder(view, teamId) {
     availableInducements = await api('/rosters/' + team.race_key + '/inducements');
   } catch (err) {
     console.warn('⚠️ Inducements indisponibles:', err.message);
+  }
+  let availableStars = [];
+  try {
+    availableStars = await api('/rosters/' + team.race_key + '/stars');
+  } catch (err) {
+    console.warn('⚠️ Stars indisponibles:', err.message);
   }
   view.innerHTML = '';
  
@@ -1500,13 +1704,16 @@ async function renderTeamBuilder(view, teamId) {
   // Header
   view.appendChild(el('div', { class: 'detail-header' },
     el('div', { style: 'display:flex; justify-content:space-between; align-items:flex-start; gap:16px; flex-wrap:wrap;' },
-      el('div', {},
+      el('div', { style: 'display:flex; align-items:center; gap:14px;' },
+        team.logo ? el('img', { src: team.logo, alt: '', style: 'width:56px; height:56px; object-fit:contain; border-radius:8px; flex:none;' }) : null,
+        el('div', {},
         el('h1', { class: 'page-title' }, team.name),
         el('div', { class: 'meta', style: 'margin-top:8px;' },
           el('span', {}, fullRoster.name),
           el('span', {}, '◆ Tier ' + fullRoster.tier),
           team.coach_name ? el('span', {}, '◆ Coach ' + team.coach_name) : null,
           team.naf_number ? el('span', {}, '◆ NAF ' + team.naf_number) : null,
+        ),
         ),
       ),
       el('div', { style: 'text-align:right;' },
@@ -1523,6 +1730,7 @@ async function renderTeamBuilder(view, teamId) {
         class: 'btn btn-gold',
         onclick: () => exportTeamToPDF(team, fullRoster, availableInducements),
       }, '📄 Export PDF'),
+      el('button', { class: 'btn btn-ghost', onclick: () => showLogoModal(team) }, '🖼 Logo'),
       el('button', { class: 'btn btn-danger', onclick: () => deleteMyTeam(team.id) }, 'Supprimer'),
     ),
   ));
@@ -1580,7 +1788,53 @@ async function renderTeamBuilder(view, teamId) {
   posTable.appendChild(posBody);
   wrap.appendChild(posTable);
   view.appendChild(wrap);
- 
+
+  // === Star Players disponibles (selon la league de l'équipe) ===
+  if (availableStars.length) {
+    view.appendChild(el('h3', { style: 'font-family:var(--font-display); letter-spacing:0.08em; text-transform:uppercase; color:var(--gold); margin: 24px 0 12px;' },
+      'Star Players disponibles'));
+    const starWrap = el('div', { class: 'table-wrap' });
+    const starTable = el('table');
+    starTable.appendChild(el('thead', {}, el('tr', {},
+      el('th', {}, 'Star Player'),
+      el('th', { class: 'td-num' }, 'MA'),
+      el('th', { class: 'td-num' }, 'ST'),
+      el('th', { class: 'td-num' }, 'AG'),
+      el('th', { class: 'td-num' }, 'PA'),
+      el('th', { class: 'td-num' }, 'AV'),
+      el('th', {}, 'Compétences'),
+      el('th', {}, 'Règle spéciale'),
+      el('th', { class: 'td-num' }, 'Coût'),
+      el('th', {}, ''),
+    )));
+    const starBody = el('tbody');
+    for (const star of availableStars) {
+      const owned = team.players.some(p => p.is_star && p.position_title === star.name && !p.dead);
+      const canAdd = !owned && remaining >= star.cost && team.players.length < 16;
+      starBody.appendChild(el('tr', {},
+        el('td', { style: 'font-weight:700; color:#fff;' }, star.name),
+        el('td', { class: 'td-num' }, String(star.ma)),
+        el('td', { class: 'td-num' }, String(star.st)),
+        el('td', { class: 'td-num' }, star.ag + '+'),
+        el('td', { class: 'td-num' }, star.pa === '-' ? '—' : star.pa + '+'),
+        el('td', { class: 'td-num' }, star.av + '+'),
+        el('td', { style: 'font-size:12px; color:var(--text-dim); max-width:280px;' },
+          (star.skills && star.skills.length) ? star.skills.join(', ') : '—'),
+        el('td', { style: 'font-size:11px; color:var(--text-faint); max-width:260px;' },
+          (star.specialRules && star.specialRules.length) ? star.specialRules.join(' ') : '—'),
+        el('td', { class: 'td-num', style: 'color:var(--netblitz-yellow); font-weight:700;' }, star.cost + 'k'),
+        el('td', {},
+          owned
+            ? el('span', { style: 'color:var(--moss, #4a7c2a); font-size:12px;' }, '✓ engagé')
+            : (canAdd ? el('button', { class: 'btn btn-primary btn-sm', onclick: () => hireStarPlayer(team, star) }, '+ Engager') : null),
+        ),
+      ));
+    }
+    starTable.appendChild(starBody);
+    starWrap.appendChild(starTable);
+    view.appendChild(starWrap);
+  }
+
   // === Joueurs de l'équipe ===
   if (team.players.length > 0) {
     view.appendChild(el('h3', { style: 'font-family:var(--font-display); letter-spacing:0.08em; text-transform:uppercase; color:var(--netblitz-yellow); margin: 32px 0 12px;' },
@@ -1610,7 +1864,7 @@ async function renderTeamBuilder(view, teamId) {
       const realMa = p.ma + (p.stat_ma_bonus || 0);
       const realSt = p.st + (p.stat_st_bonus || 0);
       const realAg = p.ag !== null ? Math.max(1, p.ag - (p.stat_ag_bonus || 0)) : null;
-      const realPa = (p.pa !== null && p.pa !== undefined)
+      const realPa = (p.pa !== null && p.pa !== undefined && p.pa !== '-')
         ? Math.max(1, p.pa - (p.stat_pa_bonus || 0)) : null;
       const realAv = p.av + (p.stat_av_bonus || 0);
  
@@ -1660,11 +1914,17 @@ async function renderTeamBuilder(view, teamId) {
         el('td', { class: 'td-num' }, fmtStat(realAg, p.stat_ag_bonus, true)),
         el('td', { class: 'td-num' }, fmtStat(realPa, p.stat_pa_bonus, true)),
         el('td', { class: 'td-num' }, fmtStat(realAv, p.stat_av_bonus, true)),
-        el('td', { style: 'font-size:12px; color:var(--text-dim); max-width:280px;' }, skillsContent),
+        el('td', { style: 'font-size:12px; color:var(--text-dim); max-width:280px;' },
+          skillsContent,
+          (p.is_star && p.special_rules)
+            ? el('div', { style: 'margin-top:4px; font-size:11px; color:var(--gold); font-style:italic;' }, '★ ' + p.special_rules)
+            : null,
+        ),
         el('td', { class: 'td-num' }, String(p.spp || 0)),
         el('td', { class: 'td-num', style: 'color:var(--netblitz-yellow); font-weight:700;' }, totalCost + 'k'),
         el('td', { style: 'display:flex; gap:4px;' },
-          el('button', {
+          // Les star players ne progressent pas
+          p.is_star ? null : el('button', {
             class: 'btn btn-gold btn-sm',
             title: 'Progression',
             onclick: () => showPlayerProgressModal(p, fullRoster),
@@ -1821,6 +2081,17 @@ async function hirePlayer(team, pos) {
       body: JSON.stringify({ number: num, position_title: pos.title }),
     });
     toast(`${pos.title} #${num} engagé`, 'success');
+    await refreshTeamBuilder();
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+async function hireStarPlayer(team, star) {
+  try {
+    await api(`/myteams/${team.id}/stars`, {
+      method: 'POST',
+      body: JSON.stringify({ star_key: star.key }),
+    });
+    toast(`${star.name} engagé`, 'success');
     await refreshTeamBuilder();
   } catch (err) { toast(err.message, 'error'); }
 }
@@ -2035,6 +2306,187 @@ async function unboostStat(playerId, stat) {
 // =============================================
 //  INIT
 // =============================================
+// =============================================
+//  MON PROFIL
+// =============================================
+async function renderProfile(view) {
+  if (!state.user) {
+    view.innerHTML = '<div class="empty">Connectez-vous pour voir votre profil.</div>';
+    return;
+  }
+  let me;
+  try { me = await api('/profile'); }
+  catch (err) { view.innerHTML = `<div class="empty">${escape(err.message)}</div>`; return; }
+
+  view.innerHTML = '';
+  view.appendChild(el('h1', { class: 'page-title' }, 'Mon profil'));
+
+  // Résumé des informations
+  const info = (label, value) => el('div', { style: 'display:flex; justify-content:space-between; gap:16px; padding:10px 0; border-bottom:1px solid var(--line);' },
+    el('span', { style: 'color:var(--text-dim); font-size:13px;' }, label),
+    el('span', { style: 'color:var(--bone); font-weight:600;' }, value),
+  );
+  view.appendChild(el('div', { class: 'card', style: 'max-width:560px; margin-bottom:28px;' },
+    info("Nom d'utilisateur", me.username),
+    info('Email', me.email),
+    info('Rôle', me.is_admin ? 'Administrateur' : 'Coach'),
+    info('Membre depuis', fmtDate(me.created_at)),
+    info('Mes équipes', String(me.teams_count)),
+  ));
+
+  // Bilan victoires / nuls / défaites par race (matchs de tournois terminés)
+  view.appendChild(el('h3', { style: 'font-family:var(--font-display); letter-spacing:0.08em; text-transform:uppercase; color:var(--gold); margin:0 0 12px;' },
+    'Bilan par race'));
+  const records = me.race_records || [];
+  if (!records.length) {
+    view.appendChild(el('div', { class: 'empty', style: 'margin-bottom:28px;' }, 'Aucun match de tournoi joué pour le moment.'));
+  } else {
+    const wrap = el('div', { class: 'table-wrap', style: 'max-width:560px; margin-bottom:28px;' });
+    const table = el('table');
+    table.appendChild(el('thead', {}, el('tr', {},
+      el('th', {}, 'Race'),
+      el('th', { class: 'td-num' }, 'J'),
+      el('th', { class: 'td-num' }, 'V'),
+      el('th', { class: 'td-num' }, 'N'),
+      el('th', { class: 'td-num' }, 'D'),
+      el('th', { class: 'td-num' }, '% V'),
+    )));
+    const tbody = el('tbody');
+    for (const r of records) {
+      const winPct = r.played ? Math.round((r.wins / r.played) * 100) : 0;
+      tbody.appendChild(el('tr', {},
+        el('td', { style: 'font-weight:600; color:var(--bone);' }, r.race),
+        el('td', { class: 'td-num' }, String(r.played)),
+        el('td', { class: 'td-num', style: 'color:var(--moss, #4a7c2a); font-weight:700;' }, String(r.wins)),
+        el('td', { class: 'td-num', style: 'color:var(--text-dim);' }, String(r.draws)),
+        el('td', { class: 'td-num', style: 'color:var(--blood-bright);' }, String(r.losses)),
+        el('td', { class: 'td-num', style: 'font-family:var(--font-mono); color:var(--netblitz-yellow);' }, winPct + '%'),
+      ));
+    }
+    table.appendChild(tbody);
+    wrap.appendChild(table);
+    view.appendChild(wrap);
+  }
+
+  // Changement de mot de passe
+  const form = el('form', { class: 'form', style: 'max-width:560px;', onsubmit: async (e) => {
+    e.preventDefault();
+    const fd = new FormData(form);
+    if (fd.get('new_password') !== fd.get('confirm_password')) {
+      toast('La confirmation ne correspond pas', 'error'); return;
+    }
+    try {
+      await api('/profile/password', { method: 'PUT', body: JSON.stringify({
+        current_password: fd.get('current_password'),
+        new_password: fd.get('new_password'),
+      }) });
+      toast('Mot de passe modifié', 'success');
+      form.reset();
+    } catch (err) { toast(err.message, 'error'); }
+  }},
+    el('div', { class: 'field' }, el('label', {}, 'Mot de passe actuel'),
+      el('input', { name: 'current_password', type: 'password', required: true, autocomplete: 'current-password' })),
+    el('div', { class: 'field' }, el('label', {}, 'Nouveau mot de passe (min 6 caractères)'),
+      el('input', { name: 'new_password', type: 'password', required: true, minlength: 6, autocomplete: 'new-password' })),
+    el('div', { class: 'field' }, el('label', {}, 'Confirmer le nouveau mot de passe'),
+      el('input', { name: 'confirm_password', type: 'password', required: true, minlength: 6, autocomplete: 'new-password' })),
+    el('div', { class: 'modal-actions' },
+      el('button', { type: 'submit', class: 'btn btn-primary' }, 'Changer le mot de passe')),
+  );
+  view.appendChild(el('h3', { style: 'font-family:var(--font-display); letter-spacing:0.08em; text-transform:uppercase; color:var(--gold); margin:0 0 12px;' },
+    'Changer mon mot de passe'));
+  view.appendChild(form);
+}
+
+// =============================================
+//  ADMINISTRATION (admins uniquement)
+// =============================================
+async function renderAdmin(view) {
+  if (!state.user || !state.user.is_admin) {
+    view.innerHTML = '<div class="empty">Accès réservé aux administrateurs.</div>';
+    return;
+  }
+  let users;
+  try { users = await api('/admin/users'); }
+  catch (err) { view.innerHTML = `<div class="empty">${escape(err.message)}</div>`; return; }
+
+  view.innerHTML = '';
+  view.appendChild(el('h1', { class: 'page-title' }, 'Administration'));
+  view.appendChild(el('p', { style: 'color:var(--text-dim); margin:0 0 24px;' },
+    `${users.length} compte${users.length > 1 ? 's' : ''} enregistré${users.length > 1 ? 's' : ''}`));
+
+  const wrap = el('div', { class: 'table-wrap' });
+  const table = el('table');
+  table.appendChild(el('thead', {}, el('tr', {},
+    el('th', {}, 'Utilisateur'),
+    el('th', {}, 'Email'),
+    el('th', {}, 'Rôle'),
+    el('th', {}, 'Inscrit le'),
+    el('th', { style: 'width:320px;' }, ''),
+  )));
+  const tbody = el('tbody');
+  for (const u of users) {
+    const isSelf = u.id === state.user.id;
+    tbody.appendChild(el('tr', {},
+      el('td', { style: 'font-weight:600; color:var(--bone);' },
+        u.username + (isSelf ? ' (vous)' : ''),
+        u.reset_requested_at
+          ? el('span', { class: 'badge', style: 'margin-left:8px; color:var(--blood-bright); border-color:var(--blood-bright); font-size:10px;' }, 'réinit. demandée')
+          : null),
+      el('td', {}, u.email),
+      el('td', {}, u.is_admin
+        ? el('span', { class: 'badge', style: 'color:var(--netblitz-yellow); border-color:var(--netblitz-yellow);' }, 'Admin')
+        : el('span', { style: 'color:var(--text-dim);' }, 'Coach')),
+      el('td', { style: 'color:var(--text-faint);' }, fmtDate(u.created_at)),
+      el('td', {},
+        el('div', { style: 'display:flex; gap:8px; flex-wrap:wrap;' },
+          el('button', { class: 'btn btn-sm', onclick: () => resetUserPassword(u) }, 'Réinit. mdp'),
+          isSelf ? null : el('button', { class: 'btn btn-sm', onclick: () => toggleAdmin(u) },
+            u.is_admin ? 'Retirer admin' : 'Rendre admin'),
+          isSelf ? null : el('button', { class: 'btn btn-danger btn-sm', onclick: () => deleteUser(u) },
+            'Supprimer'),
+        ),
+      ),
+    ));
+  }
+  table.appendChild(tbody);
+  wrap.appendChild(table);
+  view.appendChild(wrap);
+}
+
+async function toggleAdmin(u) {
+  try {
+    await api('/admin/users/' + u.id, { method: 'PUT', body: JSON.stringify({ is_admin: u.is_admin ? 0 : 1 }) });
+    toast(u.is_admin ? `${u.username} n'est plus admin` : `${u.username} est maintenant admin`, 'success');
+    renderRoute();
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+async function deleteUser(u) {
+  if (!confirm(`Supprimer définitivement le compte « ${u.username} » ?\nSes équipes (Mes équipes) seront aussi supprimées.`)) return;
+  try {
+    await api('/admin/users/' + u.id, { method: 'DELETE' });
+    toast('Compte supprimé', 'success');
+    renderRoute();
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+async function resetUserPassword(u) {
+  if (!confirm(`Réinitialiser le mot de passe de « ${u.username} » ?\nUn mot de passe temporaire sera généré.`)) return;
+  try {
+    const r = await api('/admin/users/' + u.id + '/reset-password', { method: 'POST' });
+    openModal(el('div', {},
+      el('h2', {}, 'Mot de passe réinitialisé'),
+      el('p', { style: 'color:var(--text-dim);' },
+        `Communiquez ce mot de passe temporaire à ${u.username}. Il pourra le changer ensuite dans « Mon profil ».`),
+      el('div', { style: 'font-family:var(--font-mono); font-size:22px; color:var(--netblitz-yellow); text-align:center; padding:16px; margin:12px 0; background:rgba(255,255,255,0.05); border:1px solid var(--line); border-radius:8px; user-select:all;' },
+        r.temp_password),
+      el('div', { class: 'modal-actions' },
+        el('button', { class: 'btn btn-primary', onclick: () => { closeModal(); renderRoute(); } }, 'Fermer')),
+    ));
+  } catch (err) { toast(err.message, 'error'); }
+}
+
 async function init() {
   // Liens nav
   $$('[data-route]').forEach(el => {

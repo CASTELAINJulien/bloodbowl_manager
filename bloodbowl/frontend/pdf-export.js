@@ -40,11 +40,25 @@ export function generateTeamPDF(team, roster, availableInducements = []) {
   doc.setFillColor(...COLORS.blood);
   doc.rect(0, 31.5, pageWidth, 0.8, 'F');
 
+  // Logo de l'équipe (si présent), à gauche du titre
+  let titleX = margin;
+  if (team.logo) {
+    try {
+      const box = 22;
+      const props = doc.getImageProperties(team.logo);
+      const ratio = props.width / props.height;
+      let w = box, h = box;
+      if (ratio > 1) h = box / ratio; else w = box * ratio;
+      doc.addImage(team.logo, 'PNG', margin + (box - w) / 2, 4 + (box - h) / 2, w, h);
+      titleX = margin + box + 6;
+    } catch (e) { /* logo invalide : ignoré */ }
+  }
+
   // Titre : nom de la race
   doc.setTextColor(...COLORS.yellow);
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(22);
-  doc.text(roster.name.toUpperCase(), margin, 18);
+  doc.text(roster.name.toUpperCase(), titleX, 18);
 
   // Coach + équipe
   doc.setTextColor(...COLORS.white);
@@ -126,21 +140,25 @@ export function generateTeamPDF(team, roster, availableInducements = []) {
     const realMa = p.ma + (p.stat_ma_bonus || 0);
     const realSt = p.st + (p.stat_st_bonus || 0);
     const realAg = p.ag !== null ? Math.max(1, p.ag - (p.stat_ag_bonus || 0)) : null;
-    const realPa = (p.pa !== null && p.pa !== undefined)
+    const realPa = (p.pa !== null && p.pa !== undefined && p.pa !== '-')
       ? Math.max(1, p.pa - (p.stat_pa_bonus || 0)) : null;
     const realAv = p.av + (p.stat_av_bonus || 0);
 
     const fmtStat = (val, bonus, asPlus) => {
-      if (val === null || val === undefined) return '—';
+      if (val === null || val === undefined) return '-';
       const display = asPlus ? val + '+' : String(val);
       return bonus ? '[' + display + ']' : display;
     };
 
-    // Skills : on stocke base + extras pour les rendre différemment dans didDrawCell
-    const baseSkills = p.skills || [];
+    // Skills : on stocke base / extras / règles séparément pour les rendre
+    // différemment dans didDrawCell (règles = gras + étoile).
     const extraSkills = p.extra_skills || [];
+    const ruleNames = (p.special_rules ? String(p.special_rules).split(' | ') : [])
+      .map(r => r.split(' :')[0].trim()).filter(Boolean);
+    const baseSkills = p.skills || [];
     const allSkillsStr = [
       ...baseSkills,
+      ...ruleNames.map(r => '* ' + r),
       ...extraSkills,
     ].join(', ') || '—';
 
@@ -158,6 +176,7 @@ export function generateTeamPDF(team, roster, availableInducements = []) {
         content: allSkillsStr,
         _baseSkills: baseSkills,
         _extraSkills: extraSkills,
+        _ruleNames: ruleNames,
       },
       `${totalCost}k`,
     ];
@@ -200,7 +219,8 @@ export function generateTeamPDF(team, roster, availableInducements = []) {
 
       const baseSkills = raw._baseSkills || [];
       const extraSkills = raw._extraSkills || [];
-      if (extraSkills.length === 0) return;  // rien de spécial à faire
+      const ruleNames = raw._ruleNames || [];
+      if (extraSkills.length === 0 && ruleNames.length === 0) return;  // rien de spécial
 
       // Effacer le contenu original que autoTable a déjà dessiné
       const cell = data.cell;
@@ -211,33 +231,51 @@ export function generateTeamPDF(team, roster, availableInducements = []) {
       doc.setLineWidth(0.1);
       doc.rect(cell.x, cell.y, cell.width, cell.height);
 
-      // Position du texte
-      const padding = cell.padding('left');
-      let xCursor = cell.x + padding;
-      const yText = cell.y + cell.height / 2 + 1.2;  // centré vertical
-
       doc.setFontSize(6.8);
-      doc.setTextColor(...COLORS.grayText);
+      const pad = cell.padding('left');
+      const startX = cell.x + pad;
+      const maxX = cell.x + cell.width - pad;
 
-      const writeFragment = (text, bold) => {
-        doc.setFont('helvetica', bold ? 'bold' : 'normal');
-        doc.text(text, xCursor, yText);
-        xCursor += doc.getTextWidth(text);
-      };
+      // Tokens stylés : base (gris normal), règles (gris gras + étoile), acquis (rouge gras)
+      const tokens = [];
+      baseSkills.forEach(s => tokens.push({ text: s, bold: false, color: COLORS.grayText }));
+      ruleNames.forEach(s => tokens.push({ text: '* ' + s, bold: true, color: COLORS.grayText }));
+      extraSkills.forEach(s => tokens.push({ text: s, bold: true, color: COLORS.blood }));
 
-      // Skills de base (normal)
-      baseSkills.forEach((s, i) => {
-        if (i > 0) writeFragment(', ', false);
-        writeFragment(s, false);
-      });
+      const sepW = () => { doc.setFont('helvetica', 'normal'); return doc.getTextWidth(', '); };
 
-      // Skills extras (gras + couleur sang)
-      extraSkills.forEach((s, i) => {
-        if (baseSkills.length > 0 || i > 0) writeFragment(', ', false);
-        doc.setTextColor(...COLORS.blood);
-        writeFragment(s, true);
-        doc.setTextColor(...COLORS.black);
-      });
+      // Passe de mesure : nombre de lignes avec la même logique de wrap que le rendu
+      let lines = 1, x = startX, atStart = true;
+      for (const t of tokens) {
+        doc.setFont('helvetica', t.bold ? 'bold' : 'normal');
+        const tW = doc.getTextWidth(t.text);
+        if (!atStart && x + sepW() + tW > maxX) { lines++; x = startX; atStart = true; }
+        if (!atStart) x += sepW();
+        x += tW; atStart = false;
+      }
+
+      // Hauteur de ligne (compressée si besoin pour tenir dans la cellule), bloc centré
+      let lineH = 2.8;
+      const avail = cell.height - 1.4;
+      if (lines * lineH > avail) lineH = avail / lines;
+      let yLine = cell.y + (cell.height - lines * lineH) / 2 + lineH * 0.72;
+
+      // Passe de rendu
+      x = startX; atStart = true;
+      for (const t of tokens) {
+        doc.setFont('helvetica', t.bold ? 'bold' : 'normal');
+        const tW = doc.getTextWidth(t.text);
+        if (!atStart && x + sepW() + tW > maxX) { yLine += lineH; x = startX; atStart = true; }
+        if (!atStart) {
+          doc.setFont('helvetica', 'normal'); doc.setTextColor(...COLORS.grayText);
+          doc.text(', ', x, yLine); x += sepW();
+        }
+        doc.setFont('helvetica', t.bold ? 'bold' : 'normal');
+        doc.setTextColor(...t.color);
+        doc.text(t.text, x, yLine); x += tW;
+        atStart = false;
+      }
+      doc.setTextColor(...COLORS.black);
     },
     didDrawPage: () => {
       // Pied de page
@@ -250,7 +288,8 @@ export function generateTeamPDF(team, roster, availableInducements = []) {
   });
 
   // Légende
-  if (sortedPlayers.some(p => (p.extra_skills?.length > 0) || p.stat_ma_bonus || p.stat_st_bonus || p.stat_ag_bonus || p.stat_pa_bonus || p.stat_av_bonus)) {
+  const legendShown = sortedPlayers.some(p => (p.extra_skills?.length > 0) || p.stat_ma_bonus || p.stat_st_bonus || p.stat_ag_bonus || p.stat_pa_bonus || p.stat_av_bonus);
+  if (legendShown) {
     doc.setFontSize(7);
     doc.setFont('helvetica', 'italic');
     doc.setTextColor(...COLORS.grayDark);
@@ -259,6 +298,32 @@ export function generateTeamPDF(team, roster, availableInducements = []) {
       margin,
       doc.lastAutoTable.finalY + 4
     );
+    doc.setTextColor(...COLORS.black);
+  }
+
+  // Règles spéciales des star players (descriptif complet)
+  const starRules = [];
+  for (const p of sortedPlayers) {
+    if (p.is_star && p.special_rules) {
+      String(p.special_rules).split(' | ').map(s => s.trim()).filter(Boolean)
+        .forEach(text => { if (!starRules.includes(text)) starRules.push(text); });
+    }
+  }
+  if (starRules.length) {
+    let ry = doc.lastAutoTable.finalY + (legendShown ? 11 : 7);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9);
+    doc.setTextColor(...COLORS.black);
+    doc.text('RÈGLES SPÉCIALES', margin, ry);
+    ry += 5;
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(7.5);
+    doc.setTextColor(...COLORS.grayText);
+    for (const text of starRules) {
+      const lines = doc.splitTextToSize('• ' + text, pageWidth - margin * 2);
+      doc.text(lines, margin, ry);
+      ry += lines.length * 3.6 + 2;
+    }
     doc.setTextColor(...COLORS.black);
   }
 

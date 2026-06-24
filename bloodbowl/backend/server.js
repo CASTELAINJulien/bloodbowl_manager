@@ -6,6 +6,7 @@ import { hashPassword, verifyPassword, generateToken, authMiddleware, adminOnly 
 import { computeStandings, generateNextRound } from './pairings.js';
 import { ROSTERS, SIDELINE_STAFF } from './rosters.js';
 import { INDUCEMENTS, getAvailableInducements } from './inducements.js';
+import { STAR_PLAYERS, getAvailableStars } from './stars.js';
 import {
   getAvailableSkillsForPosition,
   STAT_INCREASES,
@@ -75,6 +76,116 @@ app.post('/api/auth/login', authLimiter, async (req, res) => {
 });
 
 app.get('/api/auth/me', authMiddleware(), (req, res) => res.json({ user: req.user }));
+
+// Demande de réinitialisation de mot de passe (traitée par un admin)
+app.post('/api/auth/forgot-password', authLimiter, (req, res) => {
+  const { identifier } = req.body || {};
+  if (!identifier) return res.status(400).json({ error: 'Identifiant requis' });
+  const user = db.prepare('SELECT id FROM users WHERE username = ? OR email = ?').get(identifier, identifier);
+  if (user) {
+    db.prepare('UPDATE users SET reset_requested_at = CURRENT_TIMESTAMP WHERE id = ?').run(user.id);
+  }
+  // Réponse générique : ne révèle pas si le compte existe
+  res.json({ ok: true });
+});
+
+// Mot de passe temporaire lisible (sans caractères ambigus)
+function generateTempPassword() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
+  let p = '';
+  for (let i = 0; i < 10; i++) p += chars[Math.floor(Math.random() * chars.length)];
+  return p;
+}
+
+// === Profil utilisateur ===
+app.get('/api/profile', authMiddleware(), (req, res) => {
+  const u = db.prepare('SELECT id, username, email, is_admin, created_at FROM users WHERE id = ?').get(req.user.id);
+  if (!u) return res.status(404).json({ error: 'Utilisateur introuvable' });
+  u.teams_count = db.prepare('SELECT COUNT(*) AS c FROM roster_teams WHERE user_id = ?').get(req.user.id).c;
+
+  // Bilan victoires / nuls / défaites par race, sur les matchs de tournois terminés
+  const userTeams = db.prepare('SELECT id, race FROM teams WHERE user_id = ?').all(req.user.id);
+  const byRace = {};
+  for (const team of userTeams) {
+    const matches = db.prepare(
+      "SELECT team1_id, team2_id, td1, td2 FROM matches WHERE status = 'completed' AND (team1_id = ? OR team2_id = ?)"
+    ).all(team.id, team.id);
+    for (const mt of matches) {
+      if (mt.team1_id == null || mt.team2_id == null) continue; // bye
+      const isTeam1 = mt.team1_id === team.id;
+      const myTd = isTeam1 ? mt.td1 : mt.td2;
+      const oppTd = isTeam1 ? mt.td2 : mt.td1;
+      const r = byRace[team.race] || (byRace[team.race] = { race: team.race, wins: 0, draws: 0, losses: 0 });
+      if (myTd > oppTd) r.wins++;
+      else if (myTd < oppTd) r.losses++;
+      else r.draws++;
+    }
+  }
+  u.race_records = Object.values(byRace)
+    .map(r => ({ ...r, played: r.wins + r.draws + r.losses }))
+    .sort((a, b) => b.played - a.played || a.race.localeCompare(b.race));
+
+  res.json(u);
+});
+
+app.put('/api/profile/password', authMiddleware(), async (req, res) => {
+  const { current_password, new_password } = req.body || {};
+  if (!current_password || !new_password) {
+    return res.status(400).json({ error: 'Mot de passe actuel et nouveau requis' });
+  }
+  if (String(new_password).length < 6) {
+    return res.status(400).json({ error: 'Le nouveau mot de passe doit faire au moins 6 caractères' });
+  }
+  const u = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+  if (!u) return res.status(404).json({ error: 'Utilisateur introuvable' });
+  const ok = await verifyPassword(current_password, u.password_hash);
+  if (!ok) return res.status(400).json({ error: 'Mot de passe actuel incorrect' });
+  const hash = await hashPassword(new_password);
+  db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hash, req.user.id);
+  res.json({ ok: true });
+});
+
+// === Administration (réservé aux administrateurs) ===
+app.get('/api/admin/users', authMiddleware(), adminOnly, (req, res) => {
+  const users = db.prepare(
+    'SELECT id, username, email, is_admin, created_at, reset_requested_at FROM users ORDER BY created_at'
+  ).all();
+  res.json(users);
+});
+
+// Réinitialisation du mot de passe d'un utilisateur par un admin -> mot de passe temporaire
+app.post('/api/admin/users/:id/reset-password', authMiddleware(), adminOnly, async (req, res) => {
+  const id = Number(req.params.id);
+  const user = db.prepare('SELECT id FROM users WHERE id = ?').get(id);
+  if (!user) return res.status(404).json({ error: 'Utilisateur introuvable' });
+  const temp = generateTempPassword();
+  const hash = await hashPassword(temp);
+  db.prepare('UPDATE users SET password_hash = ?, reset_requested_at = NULL WHERE id = ?').run(hash, id);
+  res.json({ temp_password: temp });
+});
+
+app.put('/api/admin/users/:id', authMiddleware(), adminOnly, (req, res) => {
+  const id = Number(req.params.id);
+  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
+  if (!user) return res.status(404).json({ error: 'Utilisateur introuvable' });
+  if (!('is_admin' in (req.body || {}))) return res.status(400).json({ error: 'is_admin requis' });
+  const newVal = req.body.is_admin ? 1 : 0;
+  // On ne peut pas retirer ses propres droits (évite de se verrouiller dehors)
+  if (id === req.user.id && newVal === 0) {
+    return res.status(400).json({ error: 'Vous ne pouvez pas retirer vos propres droits administrateur' });
+  }
+  db.prepare('UPDATE users SET is_admin = ? WHERE id = ?').run(newVal, id);
+  res.json({ id, is_admin: newVal });
+});
+
+app.delete('/api/admin/users/:id', authMiddleware(), adminOnly, (req, res) => {
+  const id = Number(req.params.id);
+  if (id === req.user.id) return res.status(400).json({ error: 'Vous ne pouvez pas supprimer votre propre compte' });
+  const user = db.prepare('SELECT id FROM users WHERE id = ?').get(id);
+  if (!user) return res.status(404).json({ error: 'Utilisateur introuvable' });
+  db.prepare('DELETE FROM users WHERE id = ?').run(id);
+  res.json({ ok: true });
+});
 
 // === Tournois ===
 app.get('/api/tournaments', (req, res) => {
@@ -278,9 +389,9 @@ app.post('/api/tournaments/:id/assign-team', authMiddleware(), (req, res) => {
   const teamValue = computeRosterTeamValue(roster.id);
 
   const result = db.prepare(`
-    INSERT INTO teams (tournament_id, name, coach_name, race, team_value, user_id, roster_team_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(req.params.id, roster.name, coachName, raceName, teamValue, req.user.id, roster.id);
+    INSERT INTO teams (tournament_id, name, coach_name, race, team_value, user_id, roster_team_id, logo_url)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(req.params.id, roster.name, coachName, raceName, teamValue, req.user.id, roster.id, roster.logo || null);
 
   res.json(db.prepare('SELECT * FROM teams WHERE id = ?').get(result.lastInsertRowid));
 });
@@ -369,9 +480,9 @@ app.get('/api/matches/:id', (req, res) => {
     SELECT m.*,
       tt.name AS tournament_name, tt.organizer_id AS organizer_id, tt.status AS tournament_status,
       t1.name AS team1_name, t1.race AS team1_race, t1.coach_name AS team1_coach,
-      t1.team_value AS team1_tv, t1.roster_team_id AS team1_roster_id, t1.user_id AS team1_user,
+      t1.team_value AS team1_tv, t1.roster_team_id AS team1_roster_id, t1.user_id AS team1_user, t1.logo_url AS team1_logo,
       t2.name AS team2_name, t2.race AS team2_race, t2.coach_name AS team2_coach,
-      t2.team_value AS team2_tv, t2.roster_team_id AS team2_roster_id, t2.user_id AS team2_user
+      t2.team_value AS team2_tv, t2.roster_team_id AS team2_roster_id, t2.user_id AS team2_user, t2.logo_url AS team2_logo
     FROM matches m
     LEFT JOIN tournaments tt ON tt.id = m.tournament_id
     LEFT JOIN teams t1 ON t1.id = m.team1_id
@@ -474,6 +585,28 @@ app.get('/api/tournaments/:id/standings', (req, res) => {
   res.json(computeStandings(req.params.id));
 });
 
+// === Statistiques du tournoi ===
+app.get('/api/tournaments/:id/stats', (req, res) => {
+  const id = req.params.id;
+  const races = db.prepare(
+    'SELECT race, COUNT(*) AS count FROM teams WHERE tournament_id = ? GROUP BY race ORDER BY count DESC, race'
+  ).all(id);
+  const tot = db.prepare(`
+    SELECT
+      COALESCE(SUM(td1 + td2), 0) AS td,
+      COALESCE(SUM(cas1 + cas2), 0) AS cas,
+      COALESCE(SUM(passes1 + passes2), 0) AS passes,
+      COALESCE(SUM(aggressions1 + aggressions2), 0) AS aggressions,
+      COUNT(*) AS played
+    FROM matches WHERE tournament_id = ? AND status = 'completed' AND team2_id IS NOT NULL
+  `).get(id);
+  res.json({
+    races,
+    totals: { td: tot.td, cas: tot.cas, passes: tot.passes, aggressions: tot.aggressions },
+    matches_played: tot.played,
+  });
+});
+
 // === Rosters disponibles (lecture seule) ===
 app.get('/api/rosters', (req, res) => {
   // Liste résumée pour le sélecteur
@@ -481,6 +614,13 @@ app.get('/api/rosters', (req, res) => {
     key, name: r.name, tier: r.tier, rerollCost: r.rerollCost,
   }));
   res.json(list);
+});
+
+// Star players disponibles pour un roster (selon sa/ses league(s))
+app.get('/api/rosters/:key/stars', (req, res) => {
+  const r = ROSTERS[req.params.key];
+  if (!r) return res.status(404).json({ error: 'Roster inconnu' });
+  res.json(getAvailableStars(r));
 });
 
 app.get('/api/rosters/:key/inducements', (req, res) => {
@@ -534,13 +674,13 @@ app.get('/api/myteams/:id', authMiddleware(), (req, res) => {
 });
  
 app.post('/api/myteams', authMiddleware(), (req, res) => {
-  const { name, coach_name, race_key, treasury = 1000, naf_number } = req.body || {};
+  const { name, coach_name, race_key, treasury = 1000, naf_number, logo } = req.body || {};
   if (!name || !race_key) return res.status(400).json({ error: 'name et race_key requis' });
   if (!ROSTERS[race_key]) return res.status(400).json({ error: 'Roster invalide' });
   const result = db.prepare(`
-    INSERT INTO roster_teams (user_id, name, coach_name, race_key, treasury, dedicated_fans, naf_number)
-    VALUES (?, ?, ?, ?, ?, 1, ?)
-  `).run(req.user.id, name, coach_name || null, race_key, treasury, naf_number || null);
+    INSERT INTO roster_teams (user_id, name, coach_name, race_key, treasury, dedicated_fans, naf_number, logo)
+    VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+  `).run(req.user.id, name, coach_name || null, race_key, treasury, naf_number || null, logo || null);
   res.json({ id: result.lastInsertRowid });
 });
  
@@ -549,7 +689,7 @@ app.put('/api/myteams/:id', authMiddleware(), (req, res) => {
     .get(req.params.id, req.user.id);
   if (!team) return res.status(404).json({ error: 'Équipe introuvable' });
   const allowed = ['name','coach_name','treasury','rerolls','apothecary',
-                   'assistant_coaches','cheerleaders','dedicated_fans','notes','naf_number'];
+                   'assistant_coaches','cheerleaders','dedicated_fans','notes','naf_number','logo'];
   const fields = []; const values = [];
   for (const k of allowed) {
     if (k in req.body) { fields.push(`${k} = ?`); values.push(req.body[k]); }
@@ -558,6 +698,10 @@ app.put('/api/myteams/:id', authMiddleware(), (req, res) => {
   fields.push("updated_at = CURRENT_TIMESTAMP");
   values.push(req.params.id);
   db.prepare(`UPDATE roster_teams SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+  // Propage le logo aux équipes déjà inscrites en tournoi issues de ce roster
+  if ('logo' in req.body) {
+    db.prepare('UPDATE teams SET logo_url = ? WHERE roster_team_id = ?').run(req.body.logo || null, req.params.id);
+  }
   res.json({ ok: true });
 });
  
@@ -625,7 +769,45 @@ app.post('/api/myteams/:id/players', authMiddleware(), (req, res) => {
   db.prepare('UPDATE roster_teams SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(team.id);
   res.json({ id: result.lastInsertRowid });
 });
- 
+
+// Engager un star player (selon la disponibilité par league)
+app.post('/api/myteams/:id/stars', authMiddleware(), (req, res) => {
+  const team = db.prepare('SELECT * FROM roster_teams WHERE id = ? AND user_id = ?')
+    .get(req.params.id, req.user.id);
+  if (!team) return res.status(404).json({ error: 'Équipe introuvable' });
+
+  const { star_key } = req.body || {};
+  const star = STAR_PLAYERS.find(s => s.key === star_key);
+  if (!star) return res.status(400).json({ error: 'Star player invalide' });
+
+  const roster = ROSTERS[team.race_key];
+  if (!roster) return res.status(400).json({ error: 'Roster invalide' });
+  if (!getAvailableStars(roster).some(s => s.key === star_key)) {
+    return res.status(400).json({ error: "Ce star player n'est pas disponible pour la league de cette équipe" });
+  }
+
+  // Une seule fois le même star
+  const already = db.prepare(
+    "SELECT id FROM roster_players WHERE roster_team_id = ? AND position_title = ? AND dead = 0"
+  ).get(team.id, star.name);
+  if (already) return res.status(400).json({ error: 'Ce star player est déjà dans l\'équipe' });
+
+  // Prochain numéro libre
+  const used = new Set(db.prepare('SELECT number FROM roster_players WHERE roster_team_id = ?').all(team.id).map(r => r.number));
+  let num = 1; while (used.has(num) && num <= 16) num++;
+  if (num > 16) return res.status(400).json({ error: 'Effectif plein (16 joueurs max)' });
+
+  const result = db.prepare(`
+    INSERT INTO roster_players
+      (roster_team_id, number, position_title, ma, st, ag, pa, av, skills, cost, is_star, special_rules)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+  `).run(team.id, num, star.name, star.ma, star.st, star.ag, star.pa, star.av,
+    JSON.stringify(star.skills || []), star.cost, (star.specialRules || []).join(' | '));
+
+  db.prepare('UPDATE roster_teams SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(team.id);
+  res.json({ id: result.lastInsertRowid });
+});
+
 app.put('/api/myplayers/:id', authMiddleware(), (req, res) => {
   const player = db.prepare(`
     SELECT p.*, t.user_id FROM roster_players p

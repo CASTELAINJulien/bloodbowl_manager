@@ -18,7 +18,7 @@ const ROSTERS = {
     tier: 2,
     rerollCost: 70,
     apothecary: true,
-    league: 'Classique du Vieux Monde',
+    league: ['Classique du Vieux Monde'],
     specialRules: [],
     bigGuyGroupLimit: 1,
     positions: [
@@ -122,7 +122,7 @@ const ROSTERS = {
     tier: 1,
     rerollCost: 60,
     apothecary: true,
-    league: 'Super-Ligue de Lustrie',
+    league: ['Super-Ligue de Lustrie'],
     specialRules: [],
     positions: [
       {
@@ -167,7 +167,7 @@ const ROSTERS = {
     tier: 2,
     rerollCost: 70,
     apothecary: true,
-    league: 'Défi des Bas-Fonds',
+    league: ['Défi des Bas-Fonds'],
     specialRules: ['Chantage et Corruption'],
     bigGuyGroupLimit: 1,
     positions: [
@@ -247,7 +247,7 @@ const ROSTERS = {
     tier: 2,
     rerollCost: 60,
     apothecary: true,
-    league: 'Classique du Vieux Monde',
+    league: ['Classique du Vieux Monde'],
     specialRules: [],
     positions: [
       {
@@ -292,7 +292,7 @@ const ROSTERS = {
     tier: 1,
     rerollCost: 50,
     apothecary: true,
-    league: 'Ligue des Royaumes Elfiques',
+    league: ['Ligue des Royaumes Elfiques'],
     specialRules: [],
     positions: [
       {
@@ -345,7 +345,7 @@ const ROSTERS = {
     tier: 1,
     rerollCost: 50,
     apothecary: true,
-    league: 'Ligue des Royaumes Elfiques ou Ligue Sylvestre',
+    league: ['Ligue des Royaumes Elfiques', 'Ligue Sylvestre'],
     specialRules: [],
     positions: [
       {
@@ -398,7 +398,7 @@ const ROSTERS = {
     tier: 1,
     rerollCost: 50,
     apothecary: true,
-    league: 'Clash du Chaos',
+    league: ['Clash du Chaos'],
     specialRules: ['Favoris de (au choix)'],
     bigGuyGroupLimit: 1,
   positions: [
@@ -455,7 +455,7 @@ const ROSTERS = {
     tier: 2,
     rerollCost: 50,
     apothecary: true,
-    league: 'Coupe Dé à Coudre Halfling ou Ligue Sylvestre',
+    league: ['Coupe Dé à Coudre Halfling', 'Ligue Sylvestre'],
     specialRules: [],
     positions: [
       {
@@ -508,7 +508,7 @@ const ROSTERS = {
     tier: 3,
     rerollCost: 60,
     apothecary: true,
-    league: 'Bagarre des Terres Arides ou Défi des Bas-Fonds',
+    league: ['Bagarre des Terres Arides', 'Défi des Bas-Fonds'],
     specialRules: ['Chantage et Corruption'],
     positions: [
       {
@@ -585,7 +585,7 @@ const ROSTERS = {
     tier: 3,
     rerollCost: 60,
     apothecary: true,
-    league: 'Coupe Dé à Coudre Halfling ou Ligue Sylvestre',
+    league: ['Coupe Dé à Coudre Halfling', 'Ligue Sylvestre'],
     specialRules: [],
     positions: [
       {
@@ -630,7 +630,7 @@ const ROSTERS = {
     tier: 1,
     rerollCost: 50,
     apothecary: true,
-    league: 'Ligue des Royaumes Elfiques',
+    league: ['Ligue des Royaumes Elfiques'],
     specialRules: [],
     positions: [
       {
@@ -675,7 +675,7 @@ const ROSTERS = {
     tier: 1,
     rerollCost: 70,
     apothecary: true,
-    league: 'Super-Ligue de Lustrie',
+    league: ['Super-Ligue de Lustrie'],
     specialRules: [],
     positions: [
       {
@@ -720,7 +720,7 @@ const ROSTERS = {
     tier: 1,
     rerollCost: 70,
     apothecary: false,
-    league: 'Spot de Sylvanie',
+    league: ['Spot de Sylvanie'],
     specialRules: ['Maîtres de la Non-vie'],
     positions: [
       {
@@ -773,7 +773,7 @@ const ROSTERS = {
     tier: 1,
     rerollCost: 50,
     apothecary: true,
-    league: 'Classique du Vieux Monde',
+    league: ['Classique du Vieux Monde'],
     specialRules: ['Capitaine'],
     positions: [
       {
@@ -834,7 +834,7 @@ const ROSTERS = {
     tier: 1,
     rerollCost: 60,
     apothecary: true,
-    league: 'Clash du Chaos',
+    league: ['Clash du Chaos'],
     specialRules: ['Bagarreurs Brutaux','Favoris de Khorne'],
     positions: [
       {
@@ -879,7 +879,7 @@ const ROSTERS = {
     tier: 1,
     rerollCost: 70,
     apothecary: false,
-    league: 'Spot de Sylvanie',
+    league: ['Spot de Sylvanie'],
     specialRules: ['Maîtres de la Non-vie'],
     positions: [
       {
@@ -932,7 +932,7 @@ const ROSTERS = {
     tier: 1,
     rerollCost: 60,
     apothecary: true,
-    league: 'Super-Ligue du Bord du Monde',
+    league: ['Super-Ligue du Bord du Monde'],
     specialRules: ['Bagarreurs Brutaux','Chantage et Corruption'],
     positions: [
       {
@@ -985,7 +985,7 @@ const ROSTERS = {
     tier: 1,
     rerollCost: 70,
     apothecary: true,
-    league: 'Bagarre des Terres Arides ou Clash du Chaos',
+    league: ['Bagarre des Terres Arides', 'Clash du Chaos'],
     specialRules: ['Favoris de Hashut'],
     positions: [
       {
@@ -1046,7 +1046,7 @@ const ROSTERS = {
     tier: 2,
     rerollCost: 60,
     apothecary: true,
-    league: 'Classique du Vieux Monde',
+    league: ['Classique du Vieux Monde'],
     specialRules: [],
     positions: [
       {
@@ -1099,7 +1099,7 @@ const ROSTERS = {
     tier: 1,
     rerollCost: 60,
     apothecary: true,
-    league: 'Clash du Chaos ou Classique du Vieux Monde',
+    league: ['Clash du Chaos', 'Classique du Vieux Monde'],
     specialRules: ['Si Clash du Chaos est choisi, l\'équipe gagne Favoris de Khorne'],
     positions: [
       {
@@ -1160,7 +1160,7 @@ const ROSTERS = {
     tier: 1,
     rerollCost: 60,
     apothecary: false,
-    league: 'Clash du Chaos',
+    league: ['Clash du Chaos'],
     specialRules: ['Bagarreurs Brutaux','Favoris de Nurgle'],
     positions: [
       {
@@ -1205,7 +1205,7 @@ const ROSTERS = {
     tier: 3,
     rerollCost: 70,
     apothecary: true,
-    league: 'Bagarre des Terres Arides ou Super-Ligue du Bord du Monde',
+    league: ['Bagarre des Terres Arides', 'Super-Ligue du Bord du Monde'],
     specialRules: ['Bagarreurs Brutaux','Trois-Quarts à Vil Prix'],
     positions: [
       {
@@ -1242,7 +1242,7 @@ const ROSTERS = {
     tier: 1,
     rerollCost: 60,
     apothecary: true,
-    league: 'Bagarre des Terres Arides',
+    league: ['Bagarre des Terres Arides'],
     specialRules: ['Bagarreurs Brutaux','Capitaine'],
     positions: [
       {
@@ -1303,7 +1303,7 @@ const ROSTERS = {
     tier: 1,
     rerollCost: 60,
     apothecary: true,
-    league: 'Bagarre des Terres Arides',
+    league: ['Bagarre des Terres Arides'],
     specialRules: ['Bagarreurs Brutaux','Chantage et Corruption'],
     positions: [
       {
@@ -1340,7 +1340,7 @@ const ROSTERS = {
     tier: 2,
     rerollCost: 70,
     apothecary: true,
-    league: 'Clash du Chaos',
+    league: ['Clash du Chaos'],
     specialRules: ['Favoris de (au choix : Khorne, Nurgle, Slaanesh, Tzeentch ou Chaos Universel)'],
     bigGuyGroupLimit: 3,
     positions: [
@@ -1438,7 +1438,7 @@ const ROSTERS = {
     tier: 1,
     rerollCost: 60,
     apothecary: false,
-    league: 'Spot de Sylvanie',
+    league: ['Spot de Sylvanie'],
     specialRules: ['Maîtres de la Non-vie'],
     positions: [
       {
@@ -1483,7 +1483,7 @@ const ROSTERS = {
     tier: 1,
     rerollCost: 50,
     apothecary: true,
-    league: 'Défi des Bas-Fonds',
+    league: ['Défi des Bas-Fonds'],
     specialRules: [],
     positions: [
       {
@@ -1536,7 +1536,7 @@ const ROSTERS = {
     tier: 3,
     rerollCost: 70,
     apothecary: true,
-    league: 'Défi des Bas-Fonds',
+    league: ['Défi des Bas-Fonds'],
     specialRules: ['Chantage et Corruption','Trois-Quarts à Vil Prix','Déferlement'],
     positions: [
       {
@@ -1597,7 +1597,7 @@ const ROSTERS = {
     tier: 1,
     rerollCost: 50,
     apothecary: true,
-    league: 'Ligue des Royaumes Elfiques',
+    league: ['Ligue des Royaumes Elfiques'],
     specialRules: [],
     positions: [
       {
@@ -1642,7 +1642,7 @@ const ROSTERS = {
     tier: 2,
     rerollCost: 60,
     apothecary: true,
-    league: 'Spot de Sylvanie',
+    league: ['Spot de Sylvanie'],
     specialRules: ['Maîtres de la Non-vie'],
     positions: [
       {

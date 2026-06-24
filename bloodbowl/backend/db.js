@@ -148,6 +148,14 @@ if (!hasStatBoosts) {
   `);
 }
 
+// Migration : joueurs vedettes (star players)
+const rpCols = db.prepare("PRAGMA table_info(roster_players)").all().map(c => c.name);
+if (!rpCols.includes('is_star')) {
+  console.log('🔄 Migration : ajout de roster_players.is_star / special_rules');
+  db.exec('ALTER TABLE roster_players ADD COLUMN is_star INTEGER NOT NULL DEFAULT 0;');
+  db.exec('ALTER TABLE roster_players ADD COLUMN special_rules TEXT;');
+}
+
 // Migration : lien optionnel entre une équipe inscrite à un tournoi et
 // l'équipe « Mes équipes » (roster builder) dont elle est issue.
 const teamColumns = db.prepare("PRAGMA table_info(teams)").all();
@@ -191,6 +199,18 @@ const rosterTeamColumns = db.prepare("PRAGMA table_info(roster_teams)").all().ma
 if (!rosterTeamColumns.includes('naf_number')) {
   console.log('🔄 Migration : ajout de roster_teams.naf_number');
   db.exec('ALTER TABLE roster_teams ADD COLUMN naf_number TEXT;');
+}
+// Migration : logo d'équipe (stocké en data URL)
+if (!rosterTeamColumns.includes('logo')) {
+  console.log('🔄 Migration : ajout de roster_teams.logo');
+  db.exec('ALTER TABLE roster_teams ADD COLUMN logo TEXT;');
+}
+
+// Migration : demande de réinitialisation de mot de passe (mot de passe oublié)
+const userColumns = db.prepare("PRAGMA table_info(users)").all().map(c => c.name);
+if (!userColumns.includes('reset_requested_at')) {
+  console.log('🔄 Migration : ajout de users.reset_requested_at');
+  db.exec('ALTER TABLE users ADD COLUMN reset_requested_at TEXT;');
 }
 
 // Journal d'évènements d'un match (météo, tours, sorties, passes, agressions, TD)
