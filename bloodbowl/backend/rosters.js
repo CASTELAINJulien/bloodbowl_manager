@@ -455,7 +455,7 @@ const ROSTERS = {
     tier: 2,
     rerollCost: 50,
     apothecary: true,
-    league: ['Coupe Dé à Coudre Halfling', 'Ligue Sylvestre'],
+    league: ['Coupe du Dé à Coudre Halfling', 'Ligue Sylvestre'],
     specialRules: [],
     positions: [
       {
@@ -585,7 +585,7 @@ const ROSTERS = {
     tier: 3,
     rerollCost: 60,
     apothecary: true,
-    league: ['Coupe Dé à Coudre Halfling', 'Ligue Sylvestre'],
+    league: ['Coupe du Dé à Coudre Halfling', 'Ligue Sylvestre'],
     specialRules: [],
     positions: [
       {

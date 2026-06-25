@@ -155,6 +155,11 @@ if (!rpCols.includes('is_star')) {
   db.exec('ALTER TABLE roster_players ADD COLUMN is_star INTEGER NOT NULL DEFAULT 0;');
   db.exec('ALTER TABLE roster_players ADD COLUMN special_rules TEXT;');
 }
+// Migration : lien de duo entre stars (renvoyer l'un renvoie l'autre)
+if (!rpCols.includes('star_group')) {
+  console.log('🔄 Migration : ajout de roster_players.star_group');
+  db.exec('ALTER TABLE roster_players ADD COLUMN star_group TEXT;');
+}
 
 // Migration : lien optionnel entre une équipe inscrite à un tournoi et
 // l'équipe « Mes équipes » (roster builder) dont elle est issue.
@@ -211,6 +216,11 @@ const userColumns = db.prepare("PRAGMA table_info(users)").all().map(c => c.name
 if (!userColumns.includes('reset_requested_at')) {
   console.log('🔄 Migration : ajout de users.reset_requested_at');
   db.exec('ALTER TABLE users ADD COLUMN reset_requested_at TEXT;');
+}
+// Migration : numéro NAF du compte (profil)
+if (!userColumns.includes('naf_number')) {
+  console.log('🔄 Migration : ajout de users.naf_number');
+  db.exec('ALTER TABLE users ADD COLUMN naf_number TEXT;');
 }
 
 // Journal d'évènements d'un match (météo, tours, sorties, passes, agressions, TD)

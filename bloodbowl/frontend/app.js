@@ -515,9 +515,10 @@ async function renderTournament(view, id, tab) {
       t.organizer_name ? el('span', {}, '◆ Organisé par ' + t.organizer_name) : null,
     ),
     isOrganizer ? el('div', { class: 'detail-actions' },
-      teams.length >= 2 ? el('button', { class: 'btn btn-primary', onclick: () => nextRound(t.id) },
+      (teams.length >= 2 && t.status !== 'completed') ? el('button', { class: 'btn btn-primary', onclick: () => nextRound(t.id) },
         t.current_round === 0 ? 'Démarrer le tournoi' : 'Tour suivant') : null,
       t.status !== 'completed' ? el('button', { class: 'btn btn-gold', onclick: () => updateStatus(t.id, 'completed') }, 'Clôturer') : null,
+      t.status === 'completed' ? el('button', { class: 'btn btn-gold', onclick: () => exportTournamentNaf(t) }, '⬇ Export XML (NAF)') : null,
       el('button', { class: 'btn btn-danger', onclick: () => deleteTournament(t.id) }, 'Supprimer'),
     ) : null,
   );
@@ -740,10 +741,23 @@ function renderTeams(root, t, teams, isOrganizer) {
 }
 
 async function showAssignTeamModal(tournamentId) {
-  let myteams;
+  let myteams, me;
   try {
-    myteams = await api('/myteams');
+    [myteams, me] = await Promise.all([api('/myteams'), api('/profile')]);
   } catch (err) { toast(err.message, 'error'); return; }
+
+  // Numéro NAF du compte requis pour s'inscrire
+  if (!me || !me.naf_number || String(me.naf_number).trim() === '') {
+    openModal(el('div', {},
+      el('h2', {}, 'Numéro NAF requis'),
+      el('p', { style: 'color:var(--text-dim); margin:0 0 20px;' },
+        "Renseignez votre numéro NAF dans « Mon profil » avant d'inscrire une équipe à un tournoi."),
+      el('div', { class: 'modal-actions' },
+        el('button', { class: 'btn btn-ghost', onclick: closeModal }, 'Fermer'),
+        el('button', { class: 'btn btn-primary', onclick: () => { closeModal(); window.location.hash = '#/profile'; } }, 'Mon profil')),
+    ));
+    return;
+  }
 
   if (!myteams.length) {
     openModal(el('div', {},
@@ -783,7 +797,7 @@ async function showAssignTeamModal(tournamentId) {
       })(),
     ),
     el('p', { style: 'color:var(--text-faint); font-size:12px; margin:4px 0 0;' },
-      'Le nom, le coach, la race et la valeur sont repris automatiquement de votre équipe.'),
+      `Le nom, la race et la valeur sont repris de votre équipe. Inscription avec votre numéro NAF : ${me.naf_number}.`),
     el('div', { class: 'modal-actions' },
       el('button', { type: 'button', class: 'btn btn-ghost', onclick: closeModal }, 'Annuler'),
       el('button', { type: 'submit', class: 'btn btn-primary' }, 'Assigner')),
@@ -1511,6 +1525,23 @@ async function deleteTournament(id) {
   } catch (err) { toast(err.message, 'error'); }
 }
 
+// Export des résultats du tournoi au format NAF (XML) puis téléchargement
+async function exportTournamentNaf(t) {
+  try {
+    const { xml, filename } = await api(`/tournaments/${t.id}/export-naf`);
+    const blob = new Blob([xml], { type: 'application/xml;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename || `NAF-tournoi-${t.id}.xml`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    toast('Export XML généré', 'success');
+  } catch (err) { toast(err.message, 'error'); }
+}
+
 // --- Liste des équipes du coach ---
 async function renderMyTeams(view) {
   if (!state.user) {
@@ -1535,35 +1566,43 @@ async function renderMyTeams(view) {
     return;
   }
  
-  const grid = el('div', { class: 'tournaments-grid' });
-  for (const t of teams) {
-    grid.appendChild(el('div', {
-      class: 'card card-link t-card',
-      onclick: () => navigate('myteams', { id: t.id }),
-    },
-      el('div', { style: 'display:flex; justify-content:space-between; gap:12px; align-items:center;' },
-        el('div', { style: 'display:flex; align-items:center; gap:10px; min-width:0;' },
-          t.logo ? el('img', { src: t.logo, alt: '', style: 'width:36px; height:36px; object-fit:contain; border-radius:6px; flex:none;' }) : null,
-          el('h3', { class: 't-name' }, t.name),
-        ),
-        el('span', { class: 'badge', style: 'color:var(--netblitz-yellow); border-color:var(--netblitz-yellow); flex:none;' },
-          rosters.find(r => r.key === t.race_key)?.name || t.race_key),
+  const makeCard = (t) => el('div', {
+    class: 'card card-link t-card',
+    onclick: () => navigate('myteams', { id: t.id }),
+  },
+    el('div', { style: 'display:flex; justify-content:space-between; gap:12px; align-items:center;' },
+      el('div', { style: 'display:flex; align-items:center; gap:10px; min-width:0;' },
+        t.logo ? el('img', { src: t.logo, alt: '', style: 'width:36px; height:36px; object-fit:contain; border-radius:6px; flex:none;' }) : null,
+        el('h3', { class: 't-name', title: t.frozen ? 'Inscrite à un tournoi (verrouillée)' : '' },
+          (t.frozen ? '🔒 ' : '') + t.name),
       ),
-      (t.coach_name || t.naf_number) ? el('div', { class: 't-meta' },
-        t.coach_name ? el('span', {}, '◆ Coach ' + t.coach_name) : null,
-        t.naf_number ? el('span', {}, '◆ NAF ' + t.naf_number) : null,
-      ) : null,
-      el('div', { class: 't-stats' },
-        el('div', { class: 't-stat' },
-          el('span', { class: 't-stat-value' }, String(t.players_count)),
-          el('span', { class: 't-stat-label' }, 'Joueurs')),
-        el('div', { class: 't-stat' },
-          el('span', { class: 't-stat-value' }, (t.treasury / 1000).toFixed(0) + 'k'),
-          el('span', { class: 't-stat-label' }, 'Trésor')),
-      ),
-    ));
-  }
-  view.appendChild(grid);
+      el('span', { class: 'badge', style: 'color:var(--netblitz-yellow); border-color:var(--netblitz-yellow); flex:none;' },
+        rosters.find(r => r.key === t.race_key)?.name || t.race_key),
+    ),
+    t.coach_name ? el('div', { class: 't-meta' },
+      el('span', {}, '◆ Coach ' + t.coach_name),
+    ) : null,
+    el('div', { class: 't-stats' },
+      el('div', { class: 't-stat' },
+        el('span', { class: 't-stat-value' }, String(t.players_count)),
+        el('span', { class: 't-stat-label' }, 'Joueurs')),
+      el('div', { class: 't-stat' },
+        el('span', { class: 't-stat-value' }, (t.treasury / 1000).toFixed(0) + 'k'),
+        el('span', { class: 't-stat-label' }, 'Trésor')),
+    ),
+  );
+
+  const section = (title, list) => {
+    if (!list.length) return;
+    view.appendChild(el('h3', { style: 'font-family:var(--font-display); letter-spacing:0.08em; text-transform:uppercase; color:var(--netblitz-yellow); margin: 8px 0 12px;' },
+      `${title} (${list.length})`));
+    const grid = el('div', { class: 'tournaments-grid', style: 'margin-bottom:28px;' });
+    list.forEach(t => grid.appendChild(makeCard(t)));
+    view.appendChild(grid);
+  };
+
+  section('Équipes créées', teams.filter(t => !t.frozen));
+  section('Inscrites à un tournoi', teams.filter(t => t.frozen));
 }
  
 function showCreateTeamModal(rosters) {
@@ -1588,7 +1627,6 @@ function showCreateTeamModal(rosters) {
           coach_name: fd.get('coach_name') || state.user.username,
           race_key: fd.get('race_key'),
           treasury: parseInt(fd.get('treasury')) || 1000,
-          naf_number: (fd.get('naf_number') || '').trim() || null,
           logo: logoData,
         }),
       });
@@ -1601,8 +1639,6 @@ function showCreateTeamModal(rosters) {
       el('input', { name: 'name', required: true, placeholder: 'ex: Reikland Reavers' })),
     el('div', { class: 'field' }, el('label', {}, 'Nom du coach'),
       el('input', { name: 'coach_name', value: state.user.username })),
-    el('div', { class: 'field' }, el('label', {}, 'Numéro NAF (facultatif)'),
-      el('input', { name: 'naf_number', inputmode: 'numeric', placeholder: 'ex: 12345' })),
     el('div', { class: 'field' }, el('label', {}, 'Race / Roster'),
       (() => {
         const sel = el('select', { name: 'race_key', required: true });
@@ -1658,6 +1694,9 @@ function showLogoModal(team) {
   ));
 }
 
+// État (déplié ou non) de la liste des star players, conservé entre rafraîchissements
+let starListExpanded = false;
+
 // --- Team Builder : éditeur d'une équipe ---
 async function renderTeamBuilder(view, teamId) {
   const team = await api('/myteams/' + teamId);
@@ -1676,7 +1715,11 @@ async function renderTeamBuilder(view, teamId) {
     console.warn('⚠️ Stars indisponibles:', err.message);
   }
   view.innerHTML = '';
- 
+
+  // Gel : équipe inscrite à un tournoi => non modifiable tant qu'elle n'est pas désinscrite
+  const frozen = !!team.frozen;
+  const registrations = team.registrations || [];
+
   // Calcul Team Value
   // Distinction trésor (or réellement dépensé) vs TV (qui inclut les progressions)
   const playersGoldCost = team.players.reduce((s, p) => s + (p.cost || 0), 0);
@@ -1712,7 +1755,6 @@ async function renderTeamBuilder(view, teamId) {
           el('span', {}, fullRoster.name),
           el('span', {}, '◆ Tier ' + fullRoster.tier),
           team.coach_name ? el('span', {}, '◆ Coach ' + team.coach_name) : null,
-          team.naf_number ? el('span', {}, '◆ NAF ' + team.naf_number) : null,
         ),
         ),
       ),
@@ -1730,11 +1772,32 @@ async function renderTeamBuilder(view, teamId) {
         class: 'btn btn-gold',
         onclick: () => exportTeamToPDF(team, fullRoster, availableInducements),
       }, '📄 Export PDF'),
-      el('button', { class: 'btn btn-ghost', onclick: () => showLogoModal(team) }, '🖼 Logo'),
-      el('button', { class: 'btn btn-danger', onclick: () => deleteMyTeam(team.id) }, 'Supprimer'),
+      frozen ? null : el('button', { class: 'btn btn-ghost', onclick: () => showLogoModal(team) }, '🖼 Logo'),
+      frozen ? null : el('button', { class: 'btn btn-danger', onclick: () => deleteMyTeam(team.id) }, 'Supprimer'),
     ),
   ));
- 
+
+  // Bannière de gel + désinscription
+  if (frozen) {
+    const banner = el('div', { style: 'background:rgba(245,197,24,0.08); border:1px solid var(--netblitz-yellow); border-radius:8px; padding:14px 16px; margin:16px 0;' },
+      el('div', { style: 'font-weight:700; color:var(--netblitz-yellow); margin-bottom:6px;' },
+        '🔒 Équipe verrouillée — inscrite à un tournoi'),
+      el('div', { style: 'color:var(--text-dim); font-size:13px; margin-bottom:10px;' },
+        'Cette équipe ne peut plus être modifiée. Désinscrivez-la du/des tournoi(s) ci-dessous pour la débloquer.'),
+    );
+    const list = el('div', { style: 'display:flex; flex-direction:column; gap:8px;' });
+    for (const reg of registrations) {
+      list.appendChild(el('div', { style: 'display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;' },
+        el('span', {},
+          el('a', { href: `#/t/${reg.tournament_id}`, style: 'color:var(--bone); font-weight:600;' }, reg.tournament_name),
+          el('span', { class: 'badge', style: 'margin-left:8px;' }, STATUS_LABELS[reg.tournament_status] || reg.tournament_status)),
+        el('button', { class: 'btn btn-danger btn-sm', onclick: () => unregisterTeam(reg.team_id, reg.tournament_name) }, 'Désinscrire'),
+      ));
+    }
+    banner.appendChild(list);
+    view.appendChild(banner);
+  }
+
   // === Roster (positionnels disponibles) ===
   view.appendChild(el('h3', { style: 'font-family:var(--font-display); letter-spacing:0.08em; text-transform:uppercase; color:var(--netblitz-yellow); margin: 24px 0 12px;' },
     'Positionnels'));
@@ -1762,7 +1825,7 @@ async function renderTeamBuilder(view, teamId) {
     const owned = team.players.filter(p => p.position_title === pos.title && !p.dead).length;
     const groupFull = pos.inBigGuyGroup && fullRoster.bigGuyGroupLimit
       && bigGuyTotal >= fullRoster.bigGuyGroupLimit;
-    const canAdd = owned < pos.max && !groupFull && remaining >= pos.cost;
+    const canAdd = !frozen && owned < pos.max && !groupFull && remaining >= pos.cost;
     posBody.appendChild(el('tr', {},
       el('td', { style: 'font-weight:700; color:#fff;' }, pos.title),
       el('td', { class: 'td-num', style: (owned >= pos.max || groupFull) ? 'color:var(--blood-bright);' : '' },
@@ -1789,11 +1852,19 @@ async function renderTeamBuilder(view, teamId) {
   wrap.appendChild(posTable);
   view.appendChild(wrap);
 
-  // === Star Players disponibles (selon la league de l'équipe) ===
-  if (availableStars.length) {
-    view.appendChild(el('h3', { style: 'font-family:var(--font-display); letter-spacing:0.08em; text-transform:uppercase; color:var(--gold); margin: 24px 0 12px;' },
-      'Star Players disponibles'));
-    const starWrap = el('div', { class: 'table-wrap' });
+  // === Star Players disponibles (rendu plus bas, sous l'effectif) ===
+  const appendStarSection = () => {
+    if (!availableStars.length) return;
+    const starWrap = el('div', { class: 'table-wrap', style: starListExpanded ? '' : 'display:none;' });
+    const chevron = el('span', {}, starListExpanded ? '▾' : '▸');
+    view.appendChild(el('h3', {
+      style: 'font-family:var(--font-display); letter-spacing:0.08em; text-transform:uppercase; color:var(--netblitz-yellow); margin: 32px 0 12px; cursor:pointer; user-select:none; display:flex; align-items:center; gap:8px;',
+      onclick: () => {
+        starListExpanded = !starListExpanded;
+        starWrap.style.display = starListExpanded ? '' : 'none';
+        chevron.textContent = starListExpanded ? '▾' : '▸';
+      },
+    }, chevron, el('span', {}, `Star Players disponibles (${availableStars.length})`)));
     const starTable = el('table');
     starTable.appendChild(el('thead', {}, el('tr', {},
       el('th', {}, 'Star Player'),
@@ -1809,31 +1880,44 @@ async function renderTeamBuilder(view, teamId) {
     )));
     const starBody = el('tbody');
     for (const star of availableStars) {
-      const owned = team.players.some(p => p.is_star && p.position_title === star.name && !p.dead);
-      const canAdd = !owned && remaining >= star.cost && team.players.length < 16;
-      starBody.appendChild(el('tr', {},
-        el('td', { style: 'font-weight:700; color:#fff;' }, star.name),
-        el('td', { class: 'td-num' }, String(star.ma)),
-        el('td', { class: 'td-num' }, String(star.st)),
-        el('td', { class: 'td-num' }, star.ag + '+'),
-        el('td', { class: 'td-num' }, star.pa === '-' ? '—' : star.pa + '+'),
-        el('td', { class: 'td-num' }, star.av + '+'),
-        el('td', { style: 'font-size:12px; color:var(--text-dim); max-width:280px;' },
-          (star.skills && star.skills.length) ? star.skills.join(', ') : '—'),
-        el('td', { style: 'font-size:11px; color:var(--text-faint); max-width:260px;' },
-          (star.specialRules && star.specialRules.length) ? star.specialRules.join(' ') : '—'),
-        el('td', { class: 'td-num', style: 'color:var(--netblitz-yellow); font-weight:700;' }, star.cost + 'k'),
-        el('td', {},
-          owned
-            ? el('span', { style: 'color:var(--moss, #4a7c2a); font-size:12px;' }, '✓ engagé')
-            : (canAdd ? el('button', { class: 'btn btn-primary btn-sm', onclick: () => hireStarPlayer(team, star) }, '+ Engager') : null),
-        ),
-      ));
+      const members = (star.members && star.members.length) ? star.members : [star];
+      const isDuo = members.length > 1;
+      const owned = members.some(mem => team.players.some(p => p.is_star && p.position_title === mem.name && !p.dead));
+      const canAdd = !frozen && !owned && remaining >= star.cost && (team.players.length + members.length) <= 16;
+      const actionCell = owned
+        ? el('span', { style: 'color:var(--moss, #4a7c2a); font-size:12px;' }, '✓ engagé')
+        : (canAdd ? el('button', {
+            class: 'btn btn-primary btn-sm',
+            title: isDuo ? 'Engage le duo (les 2 joueurs)' : '',
+            onclick: () => hireStarPlayer(team, star),
+          }, isDuo ? '+ Engager (×2)' : '+ Engager') : null);
+
+      members.forEach((mem, idx) => {
+        const cells = [
+          el('td', { style: 'font-weight:700; color:#fff;' },
+            mem.name, isDuo ? el('span', { style: 'color:var(--gold); font-size:10px; margin-left:6px;' }, '· duo') : null),
+          el('td', { class: 'td-num' }, String(mem.ma)),
+          el('td', { class: 'td-num' }, String(mem.st)),
+          el('td', { class: 'td-num' }, mem.ag + '+'),
+          el('td', { class: 'td-num' }, mem.pa === '-' ? '—' : mem.pa + '+'),
+          el('td', { class: 'td-num' }, mem.av + '+'),
+          el('td', { style: 'font-size:12px; color:var(--text-dim); max-width:280px;' },
+            (mem.skills && mem.skills.length) ? mem.skills.join(', ') : '—'),
+          el('td', { style: 'font-size:11px; color:var(--text-faint); max-width:260px;' },
+            (mem.specialRules && mem.specialRules.length) ? mem.specialRules.join(' ') : '—'),
+        ];
+        // Coût + action : une seule fois, fusionnés sur toutes les lignes du duo
+        if (idx === 0) {
+          cells.push(el('td', { class: 'td-num', rowspan: members.length, style: 'color:var(--netblitz-yellow); font-weight:700; vertical-align:middle;' }, star.cost + 'k'));
+          cells.push(el('td', { rowspan: members.length, style: 'vertical-align:middle;' }, actionCell));
+        }
+        starBody.appendChild(el('tr', {}, ...cells));
+      });
     }
     starTable.appendChild(starBody);
     starWrap.appendChild(starTable);
     view.appendChild(starWrap);
-  }
+  };
 
   // === Joueurs de l'équipe ===
   if (team.players.length > 0) {
@@ -1904,8 +1988,9 @@ async function renderTeamBuilder(view, teamId) {
             type: 'text',
             value: p.player_name || '',
             placeholder: 'Nom du joueur',
+            readonly: frozen ? true : null,
             style: 'background:transparent; border:1px solid var(--line); color:var(--text); padding:4px 8px; width:100%; font-size:13px;',
-            onblur: (e) => updatePlayerName(p.id, e.target.value),
+            onblur: frozen ? null : (e) => updatePlayerName(p.id, e.target.value),
           }),
         ),
         el('td', {}, p.position_title),
@@ -1923,16 +2008,16 @@ async function renderTeamBuilder(view, teamId) {
         el('td', { class: 'td-num' }, String(p.spp || 0)),
         el('td', { class: 'td-num', style: 'color:var(--netblitz-yellow); font-weight:700;' }, totalCost + 'k'),
         el('td', { style: 'display:flex; gap:4px;' },
-          // Les star players ne progressent pas
-          p.is_star ? null : el('button', {
+          // Édition verrouillée si l'équipe est inscrite à un tournoi
+          (frozen || p.is_star) ? null : el('button', {
             class: 'btn btn-gold btn-sm',
             title: 'Progression',
             onclick: () => showPlayerProgressModal(p, fullRoster),
           }, '⬆'),
-          el('button', {
+          frozen ? null : el('button', {
             class: 'btn btn-danger btn-sm',
-            title: 'Renvoyer',
-            onclick: () => firePlayer(p.id),
+            title: p.star_group ? 'Renvoyer le duo' : 'Renvoyer',
+            onclick: () => firePlayer(p),
           }, '✕'),
         ),
       ));
@@ -1942,7 +2027,10 @@ async function renderTeamBuilder(view, teamId) {
     wrap2.appendChild(playersTable);
     view.appendChild(wrap2);
   }
- 
+
+  // Liste des star players, sous le tableau d'effectif
+  appendStarSection();
+
   // === Sideline Staff ===
   view.appendChild(el('h3', { style: 'font-family:var(--font-display); letter-spacing:0.08em; text-transform:uppercase; color:var(--netblitz-yellow); margin: 32px 0 12px;' },
     'Personnel & Re-rolls'));
@@ -1964,14 +2052,14 @@ async function renderTeamBuilder(view, teamId) {
       el('div', { style: 'display:flex; align-items:center; gap:8px; margin-top:8px;' },
         el('button', {
           class: 'btn btn-sm',
-          disabled: current <= (item.min || 0),
+          disabled: frozen || current <= (item.min || 0),
           onclick: () => updateStaff(team.id, item.key, current - 1),
         }, '−'),
         el('span', { style: 'font-family:var(--font-display); font-size:24px; color:var(--netblitz-yellow); min-width:40px; text-align:center; font-weight:900;' },
           String(current)),
         el('button', {
           class: 'btn btn-sm',
-          disabled: current >= item.max || remaining < item.cost,
+          disabled: frozen || current >= item.max || remaining < item.cost,
           onclick: () => updateStaff(team.id, item.key, current + 1),
         }, '+'),
 	el('span', { style: 'font-family:var(--font-mono); font-size:11px; color:var(--text-faint); margin-left:auto;' },
@@ -2012,14 +2100,14 @@ async function renderTeamBuilder(view, teamId) {
         el('div', { style: 'display:flex; align-items:center; gap:8px;' },
           el('button', {
             class: 'btn btn-sm',
-            disabled: current <= 0,
+            disabled: frozen || current <= 0,
             onclick: () => updateInducement(team.id, ind.key, current - 1),
           }, '−'),
           el('span', { style: 'font-family:var(--font-display); font-size:24px; color:var(--netblitz-yellow); min-width:36px; text-align:center; font-weight:900;' },
             String(current)),
           el('button', {
             class: 'btn btn-sm',
-            disabled: current >= max || remaining < cost,
+            disabled: frozen || current >= max || remaining < cost,
             onclick: () => updateInducement(team.id, ind.key, current + 1),
           }, '+'),
           el('span', { style: 'font-family:var(--font-mono); font-size:11px; color:var(--text-faint); margin-left:auto; text-align:right;' },
@@ -2096,11 +2184,14 @@ async function hireStarPlayer(team, star) {
   } catch (err) { toast(err.message, 'error'); }
 }
 
-async function firePlayer(id) {
-  if (!confirm('Renvoyer ce joueur ?')) return;
+async function firePlayer(p) {
+  const isDuo = !!p.star_group;
+  if (!confirm(isDuo
+    ? 'Ce star fait partie d\'un duo : le renvoyer renvoie aussi son binôme. Continuer ?'
+    : 'Renvoyer ce joueur ?')) return;
   try {
-    await api('/myplayers/' + id, { method: 'DELETE' });
-    toast('Joueur renvoyé', 'success');
+    await api('/myplayers/' + p.id, { method: 'DELETE' });
+    toast(isDuo ? 'Duo renvoyé' : 'Joueur renvoyé', 'success');
     await refreshTeamBuilder();
   } catch (err) { toast(err.message, 'error'); }
 }
@@ -2247,6 +2338,16 @@ async function deleteMyTeam(id) {
   } catch (err) { toast(err.message, 'error'); }
 }
 
+// Désinscrire l'équipe d'un tournoi (supprime la ligne `teams`) -> la débloque
+async function unregisterTeam(teamId, tournamentName) {
+  if (!confirm(`Désinscrire l'équipe de « ${tournamentName} » ? Elle redeviendra modifiable.`)) return;
+  try {
+    await api('/teams/' + teamId, { method: 'DELETE' });
+    toast('Équipe désinscrite', 'success');
+    await refreshTeamBuilder();
+  } catch (err) { toast(err.message, 'error'); }
+}
+
 async function exportTeamToPDF(team, roster, availableInducements) {
   try {
     toast('Génération du PDF…');
@@ -2329,10 +2430,30 @@ async function renderProfile(view) {
   view.appendChild(el('div', { class: 'card', style: 'max-width:560px; margin-bottom:28px;' },
     info("Nom d'utilisateur", me.username),
     info('Email', me.email),
+    info('Numéro NAF', me.naf_number || '—'),
     info('Rôle', me.is_admin ? 'Administrateur' : 'Coach'),
     info('Membre depuis', fmtDate(me.created_at)),
     info('Mes équipes', String(me.teams_count)),
   ));
+
+  // Édition du numéro NAF
+  const nafForm = el('form', { class: 'form', style: 'max-width:560px; margin-bottom:28px;', onsubmit: async (e) => {
+    e.preventDefault();
+    const fd = new FormData(nafForm);
+    try {
+      await api('/profile', { method: 'PUT', body: JSON.stringify({ naf_number: (fd.get('naf_number') || '').trim() || null }) });
+      toast('Numéro NAF enregistré', 'success');
+      renderRoute();
+    } catch (err) { toast(err.message, 'error'); }
+  }},
+    el('div', { class: 'field' }, el('label', {}, 'Mon numéro NAF'),
+      el('input', { name: 'naf_number', inputmode: 'numeric', value: me.naf_number || '', placeholder: 'ex: 33131' })),
+    el('div', { class: 'modal-actions' },
+      el('button', { type: 'submit', class: 'btn btn-primary' }, 'Enregistrer le NAF')),
+  );
+  view.appendChild(el('h3', { style: 'font-family:var(--font-display); letter-spacing:0.08em; text-transform:uppercase; color:var(--gold); margin:0 0 12px;' },
+    'Numéro NAF'));
+  view.appendChild(nafForm);
 
   // Bilan victoires / nuls / défaites par race (matchs de tournois terminés)
   view.appendChild(el('h3', { style: 'font-family:var(--font-display); letter-spacing:0.08em; text-transform:uppercase; color:var(--gold); margin:0 0 12px;' },

@@ -6,7 +6,7 @@ import { hashPassword, verifyPassword, generateToken, authMiddleware, adminOnly 
 import { computeStandings, generateNextRound } from './pairings.js';
 import { ROSTERS, SIDELINE_STAFF } from './rosters.js';
 import { INDUCEMENTS, getAvailableInducements } from './inducements.js';
-import { STAR_PLAYERS, getAvailableStars } from './stars.js';
+import { STAR_PLAYERS, getAvailableStars, starMembers } from './stars.js';
 import {
   getAvailableSkillsForPosition,
   STAT_INCREASES,
@@ -99,7 +99,7 @@ function generateTempPassword() {
 
 // === Profil utilisateur ===
 app.get('/api/profile', authMiddleware(), (req, res) => {
-  const u = db.prepare('SELECT id, username, email, is_admin, created_at FROM users WHERE id = ?').get(req.user.id);
+  const u = db.prepare('SELECT id, username, email, is_admin, created_at, naf_number FROM users WHERE id = ?').get(req.user.id);
   if (!u) return res.status(404).json({ error: 'Utilisateur introuvable' });
   u.teams_count = db.prepare('SELECT COUNT(*) AS c FROM roster_teams WHERE user_id = ?').get(req.user.id).c;
 
@@ -126,6 +126,15 @@ app.get('/api/profile', authMiddleware(), (req, res) => {
     .sort((a, b) => b.played - a.played || a.race.localeCompare(b.race));
 
   res.json(u);
+});
+
+// Mise à jour du profil (numéro NAF)
+app.put('/api/profile', authMiddleware(), (req, res) => {
+  if (!('naf_number' in (req.body || {}))) return res.status(400).json({ error: 'Rien à modifier' });
+  const naf = (req.body.naf_number == null || String(req.body.naf_number).trim() === '')
+    ? null : String(req.body.naf_number).trim();
+  db.prepare('UPDATE users SET naf_number = ? WHERE id = ?').run(naf, req.user.id);
+  res.json({ ok: true, naf_number: naf });
 });
 
 app.put('/api/profile/password', authMiddleware(), async (req, res) => {
@@ -365,6 +374,12 @@ app.post('/api/tournaments/:id/assign-team', authMiddleware(), (req, res) => {
     .get(roster_team_id, req.user.id);
   if (!roster) return res.status(404).json({ error: 'Équipe introuvable' });
 
+  // Numéro NAF (du compte) obligatoire pour s'inscrire à un tournoi
+  const account = db.prepare('SELECT naf_number FROM users WHERE id = ?').get(req.user.id);
+  if (!account || !account.naf_number || String(account.naf_number).trim() === '') {
+    return res.status(400).json({ error: 'Numéro NAF requis : renseignez-le dans « Mon profil » avant de vous inscrire.' });
+  }
+
   // Pas deux fois la même équipe dans le même tournoi
   const dup = db.prepare(
     'SELECT id FROM teams WHERE tournament_id = ? AND roster_team_id = ?'
@@ -439,6 +454,10 @@ app.get('/api/tournaments/:id/matches', (req, res) => {
 
 app.post('/api/tournaments/:id/next-round', authMiddleware(), (req, res) => {
   if (!canManage(req, req.params.id)) return res.status(403).json({ error: 'Non autorisé' });
+  const tour = db.prepare('SELECT status FROM tournaments WHERE id = ?').get(req.params.id);
+  if (tour && tour.status === 'completed') {
+    return res.status(400).json({ error: 'Tournoi clôturé : impossible de générer un nouveau tour' });
+  }
   try {
     const result = generateNextRound(req.params.id);
     // Si on génère le premier tour, on passe en in_progress
@@ -448,6 +467,97 @@ app.post('/api/tournaments/:id/next-round', authMiddleware(), (req, res) => {
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
+});
+
+// Correspondance race (clé roster FR) -> nom NAF officiel (EN)
+const NAF_RACE_BY_KEY = {
+  alliance_vieux_monde: 'old world alliance',
+  amazones: 'amazon',
+  bas_fonds: 'underworld denizens',
+  bretonniens: 'bretonnian',
+  elfes_noirs: 'dark elf',
+  elfes_sylvains: 'wood elf',
+  elus_chaos: 'chaos chosen',
+  gnomes: 'gnome',
+  gobelins: 'goblin',
+  halflings: 'halfling',
+  hauts_elfes: 'high elf',
+  hommes_lezards: 'lizardmen',
+  horreurs_necromantiques: 'necromantic horror',
+  humains: 'human',
+  khorne: 'khorne',
+  morts_ambulants: 'shambling undead',
+  nains: 'dwarf',
+  nains_chaos: 'chaos dwarf',
+  noblesse_imperiale: 'imperial nobility',
+  nordiques: 'norse',
+  nurgle: 'nurgle',
+  ogres: 'ogre',
+  orques: 'orc',
+  orques_noirs: 'black orc',
+  renegats_chaos: 'chaos renegade',
+  rois_tombes: 'tomb kings',
+  skavens: 'skaven',
+  snotlings: 'snotling',
+  union_elfique: 'elven union',
+  vampires: 'vampire',
+};
+
+// Export des résultats au format NAF (XML) — tournoi clôturé
+app.get('/api/tournaments/:id/export-naf', authMiddleware(), (req, res) => {
+  if (!canManage(req, req.params.id)) return res.status(403).json({ error: 'Non autorisé' });
+  const t = db.prepare('SELECT * FROM tournaments WHERE id = ?').get(req.params.id);
+  if (!t) return res.status(404).json({ error: 'Tournoi introuvable' });
+
+  const org = t.organizer_id ? db.prepare('SELECT username FROM users WHERE id = ?').get(t.organizer_id) : null;
+
+  // Équipes avec le numéro NAF récupéré depuis le roster lié
+  const teams = db.prepare(`
+    SELECT te.*, u.naf_number AS naf, rt.race_key AS race_key
+    FROM teams te
+    LEFT JOIN roster_teams rt ON rt.id = te.roster_team_id
+    LEFT JOIN users u ON u.id = te.user_id
+    WHERE te.tournament_id = ?
+    ORDER BY te.id
+  `).all(req.params.id);
+  const teamById = {};
+  for (const tm of teams) teamById[tm.id] = tm;
+  // Nom NAF (EN) si on connaît la clé de roster, sinon la race stockée
+  const nafRace = (tm) => (tm && NAF_RACE_BY_KEY[tm.race_key]) || (tm ? tm.race : '');
+
+  const matches = db.prepare(`
+    SELECT * FROM matches
+    WHERE tournament_id = ? AND status = 'completed' AND team1_id IS NOT NULL AND team2_id IS NOT NULL
+    ORDER BY round, id
+  `).all(req.params.id);
+
+  const esc = (s) => String(s ?? '').replace(/[<>&'"]/g, c =>
+    ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;' }[c]));
+  const naf = (tm) => (tm && tm.naf != null && String(tm.naf).trim() !== '') ? esc(tm.naf) : '0';
+  const record = (tm, td, cas) =>
+    `<playerRecord><name>${esc(tm ? tm.coach_name : '')}</name><number>${naf(tm)}</number>` +
+    `<teamRating>132</teamRating><touchDowns>${td || 0}</touchDowns><badlyHurt>${cas || 0}</badlyHurt></playerRecord>`;
+
+  let xml = '<?xml version="1.0" encoding="utf-8"?>';
+  xml += '<nafReport xmlns:blo="http://www.bloodbowl.net">';
+  xml += `<organiser>${esc(org ? org.username : '')}</organiser>`;
+  xml += '<coaches>';
+  for (const tm of teams) {
+    xml += `<coach><name>${esc(tm.coach_name)}</name><number>${naf(tm)}</number><team>${esc(nafRace(tm))}</team></coach>`;
+  }
+  xml += '</coaches>';
+  for (const m of matches) {
+    const ts = String(m.played_at || '').replace('T', ' ').slice(0, 16);
+    xml += '<game>';
+    xml += `<timeStamp>${esc(ts)}</timeStamp>`;
+    xml += record(teamById[m.team1_id], m.td1, m.cas1);
+    xml += record(teamById[m.team2_id], m.td2, m.cas2);
+    xml += '</game>';
+  }
+  xml += '</nafReport>';
+
+  const filename = `NAF-${String(t.name || 'tournoi').replace(/[^a-zA-Z0-9]+/g, '_')}.xml`;
+  res.json({ xml, filename });
 });
 
 app.put('/api/matches/:id', authMiddleware(), (req, res) => {
@@ -643,7 +753,9 @@ app.get('/api/rosters/:key', (req, res) => {
 // === Team Builder : équipes sauvegardées ===
 app.get('/api/myteams', authMiddleware(), (req, res) => {
   const teams = db.prepare(`
-    SELECT t.*, (SELECT COUNT(*) FROM roster_players WHERE roster_team_id = t.id) AS players_count
+    SELECT t.*,
+      (SELECT COUNT(*) FROM roster_players WHERE roster_team_id = t.id) AS players_count,
+      EXISTS(SELECT 1 FROM teams WHERE roster_team_id = t.id) AS frozen
     FROM roster_teams t WHERE user_id = ?
     ORDER BY t.updated_at DESC
   `).all(req.user.id);
@@ -669,8 +781,9 @@ app.get('/api/myteams/:id', authMiddleware(), (req, res) => {
   ).all(team.id);
   const inducements = {};
   for (const row of inducementRows) inducements[row.inducement_key] = row.quantity;
- 
-  res.json({ ...team, players, inducements });
+
+  const registrations = rosterTeamRegistrations(team.id);
+  res.json({ ...team, players, inducements, registrations, frozen: registrations.length > 0 });
 });
  
 app.post('/api/myteams', authMiddleware(), (req, res) => {
@@ -683,11 +796,32 @@ app.post('/api/myteams', authMiddleware(), (req, res) => {
   `).run(req.user.id, name, coach_name || null, race_key, treasury, naf_number || null, logo || null);
   res.json({ id: result.lastInsertRowid });
 });
- 
+
+// === Gel : une équipe (roster) inscrite à un tournoi ne peut plus être modifiée ===
+function rosterTeamRegistrations(rosterTeamId) {
+  return db.prepare(`
+    SELECT te.id AS team_id, te.tournament_id, t.name AS tournament_name, t.status AS tournament_status
+    FROM teams te JOIN tournaments t ON t.id = te.tournament_id
+    WHERE te.roster_team_id = ?
+    ORDER BY t.created_at
+  `).all(rosterTeamId);
+}
+function isRosterTeamFrozen(rosterTeamId) {
+  return !!db.prepare('SELECT 1 FROM teams WHERE roster_team_id = ? LIMIT 1').get(rosterTeamId);
+}
+function rejectIfFrozen(rosterTeamId, res) {
+  if (isRosterTeamFrozen(rosterTeamId)) {
+    res.status(409).json({ error: 'Équipe verrouillée : inscrite à un tournoi. Désinscrivez-la pour la modifier.' });
+    return true;
+  }
+  return false;
+}
+
 app.put('/api/myteams/:id', authMiddleware(), (req, res) => {
   const team = db.prepare('SELECT * FROM roster_teams WHERE id = ? AND user_id = ?')
     .get(req.params.id, req.user.id);
   if (!team) return res.status(404).json({ error: 'Équipe introuvable' });
+  if (rejectIfFrozen(team.id, res)) return;
   const allowed = ['name','coach_name','treasury','rerolls','apothecary',
                    'assistant_coaches','cheerleaders','dedicated_fans','notes','naf_number','logo'];
   const fields = []; const values = [];
@@ -709,6 +843,7 @@ app.delete('/api/myteams/:id', authMiddleware(), (req, res) => {
   const team = db.prepare('SELECT id FROM roster_teams WHERE id = ? AND user_id = ?')
     .get(req.params.id, req.user.id);
   if (!team) return res.status(404).json({ error: 'Équipe introuvable' });
+  if (rejectIfFrozen(team.id, res)) return;
   db.prepare('DELETE FROM roster_teams WHERE id = ?').run(req.params.id);
   res.json({ ok: true });
 });
@@ -718,7 +853,8 @@ app.post('/api/myteams/:id/players', authMiddleware(), (req, res) => {
   const team = db.prepare('SELECT * FROM roster_teams WHERE id = ? AND user_id = ?')
     .get(req.params.id, req.user.id);
   if (!team) return res.status(404).json({ error: 'Équipe introuvable' });
- 
+  if (rejectIfFrozen(team.id, res)) return;
+
   const { number, position_title, player_name } = req.body || {};
   if (!number || !position_title) return res.status(400).json({ error: 'Champs manquants' });
  
@@ -775,6 +911,7 @@ app.post('/api/myteams/:id/stars', authMiddleware(), (req, res) => {
   const team = db.prepare('SELECT * FROM roster_teams WHERE id = ? AND user_id = ?')
     .get(req.params.id, req.user.id);
   if (!team) return res.status(404).json({ error: 'Équipe introuvable' });
+  if (rejectIfFrozen(team.id, res)) return;
 
   const { star_key } = req.body || {};
   const star = STAR_PLAYERS.find(s => s.key === star_key);
@@ -786,26 +923,43 @@ app.post('/api/myteams/:id/stars', authMiddleware(), (req, res) => {
     return res.status(400).json({ error: "Ce star player n'est pas disponible pour la league de cette équipe" });
   }
 
-  // Une seule fois le même star
-  const already = db.prepare(
-    "SELECT id FROM roster_players WHERE roster_team_id = ? AND position_title = ? AND dead = 0"
-  ).get(team.id, star.name);
-  if (already) return res.status(400).json({ error: 'Ce star player est déjà dans l\'équipe' });
+  const members = starMembers(star);
 
-  // Prochain numéro libre
+  // Aucun des membres ne doit déjà être présent
+  for (const mem of members) {
+    const already = db.prepare(
+      "SELECT id FROM roster_players WHERE roster_team_id = ? AND position_title = ? AND dead = 0"
+    ).get(team.id, mem.name);
+    if (already) return res.status(400).json({ error: `${mem.name} est déjà dans l'équipe` });
+  }
+
+  // Place pour tous les membres (16 joueurs max)
   const used = new Set(db.prepare('SELECT number FROM roster_players WHERE roster_team_id = ?').all(team.id).map(r => r.number));
-  let num = 1; while (used.has(num) && num <= 16) num++;
-  if (num > 16) return res.status(400).json({ error: 'Effectif plein (16 joueurs max)' });
+  if (used.size + members.length > 16) {
+    return res.status(400).json({ error: 'Pas assez de place dans l\'effectif (16 joueurs max)' });
+  }
 
-  const result = db.prepare(`
+  // Répartition du coût combiné entre les membres (le 1er prend l'arrondi)
+  const n = members.length;
+  const base = Math.floor((star.cost || 0) / n);
+  const costs = members.map((_, i) => i === 0 ? (star.cost || 0) - base * (n - 1) : base);
+
+  // Identifiant de duo : présent seulement si plusieurs membres (lie les renvois)
+  const group = members.length > 1 ? star.key : null;
+  const insert = db.prepare(`
     INSERT INTO roster_players
-      (roster_team_id, number, position_title, ma, st, ag, pa, av, skills, cost, is_star, special_rules)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
-  `).run(team.id, num, star.name, star.ma, star.st, star.ag, star.pa, star.av,
-    JSON.stringify(star.skills || []), star.cost, (star.specialRules || []).join(' | '));
+      (roster_team_id, number, position_title, ma, st, ag, pa, av, skills, cost, is_star, special_rules, star_group)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+  `);
+  members.forEach((mem, i) => {
+    let num = 1; while (used.has(num) && num <= 16) num++;
+    used.add(num);
+    insert.run(team.id, num, mem.name, mem.ma, mem.st, mem.ag, mem.pa, mem.av,
+      JSON.stringify(mem.skills || []), costs[i], (mem.specialRules || []).join(' | '), group);
+  });
 
   db.prepare('UPDATE roster_teams SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(team.id);
-  res.json({ id: result.lastInsertRowid });
+  res.json({ ok: true });
 });
 
 app.put('/api/myplayers/:id', authMiddleware(), (req, res) => {
@@ -817,6 +971,7 @@ app.put('/api/myplayers/:id', authMiddleware(), (req, res) => {
   if (!player || player.user_id !== req.user.id) {
     return res.status(404).json({ error: 'Joueur introuvable' });
   }
+  if (rejectIfFrozen(player.roster_team_id, res)) return;
   const allowed = ['player_name','number','spp','mng','ni','dead','extra_skills'];
   const fields = []; const values = [];
   for (const k of allowed) {
@@ -841,7 +996,14 @@ app.delete('/api/myplayers/:id', authMiddleware(), (req, res) => {
   if (!player || player.user_id !== req.user.id) {
     return res.status(404).json({ error: 'Joueur introuvable' });
   }
-  db.prepare('DELETE FROM roster_players WHERE id = ?').run(req.params.id);
+  if (rejectIfFrozen(player.roster_team_id, res)) return;
+  if (player.star_group) {
+    // Membre d'un duo : on renvoie tout le groupe
+    db.prepare('DELETE FROM roster_players WHERE roster_team_id = ? AND star_group = ?')
+      .run(player.roster_team_id, player.star_group);
+  } else {
+    db.prepare('DELETE FROM roster_players WHERE id = ?').run(req.params.id);
+  }
   db.prepare('UPDATE roster_teams SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(player.roster_team_id);
   res.json({ ok: true });
 });
@@ -851,7 +1013,8 @@ app.put('/api/myteams/:id/inducements/:key', authMiddleware(), (req, res) => {
   const team = db.prepare('SELECT * FROM roster_teams WHERE id = ? AND user_id = ?')
     .get(req.params.id, req.user.id);
   if (!team) return res.status(404).json({ error: 'Équipe introuvable' });
- 
+  if (rejectIfFrozen(team.id, res)) return;
+
   const roster = ROSTERS[team.race_key];
   if (!roster) return res.status(400).json({ error: 'Roster invalide' });
  
@@ -909,6 +1072,7 @@ app.post('/api/myplayers/:id/skills', authMiddleware(), (req, res) => {
     WHERE p.id = ? AND t.user_id = ?
   `).get(req.params.id, req.user.id);
   if (!player) return res.status(404).json({ error: 'Joueur introuvable' });
+  if (rejectIfFrozen(player.roster_team_id, res)) return;
  
   // Vérifier que la skill est bien accessible au positionnel
   const roster = ROSTERS[player.race_key];
@@ -957,6 +1121,7 @@ app.delete('/api/myplayers/:id/skills/:skill', authMiddleware(), (req, res) => {
     WHERE p.id = ? AND t.user_id = ?
   `).get(req.params.id, req.user.id);
   if (!player) return res.status(404).json({ error: 'Joueur introuvable' });
+  if (rejectIfFrozen(player.roster_team_id, res)) return;
  
   let extras = [];
   try { extras = player.extra_skills ? JSON.parse(player.extra_skills) : []; } catch {}
@@ -996,6 +1161,7 @@ app.post('/api/myplayers/:id/stats', authMiddleware(), (req, res) => {
     WHERE p.id = ? AND t.user_id = ?
   `).get(req.params.id, req.user.id);
   if (!player) return res.status(404).json({ error: 'Joueur introuvable' });
+  if (rejectIfFrozen(player.roster_team_id, res)) return;
  
   // Limites raisonnables : on ne va pas au-delà de +2 par stat
   const colName = `stat_${stat}_bonus`;
@@ -1026,6 +1192,7 @@ app.delete('/api/myplayers/:id/stats/:stat', authMiddleware(), (req, res) => {
     WHERE p.id = ? AND t.user_id = ?
   `).get(req.params.id, req.user.id);
   if (!player) return res.status(404).json({ error: 'Joueur introuvable' });
+  if (rejectIfFrozen(player.roster_team_id, res)) return;
  
   const colName = `stat_${stat}_bonus`;
   const currentBonus = player[colName] || 0;
