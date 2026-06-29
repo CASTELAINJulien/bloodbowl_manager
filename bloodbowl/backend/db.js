@@ -189,6 +189,9 @@ addMatchCol('turn1', 'turn1 INTEGER NOT NULL DEFAULT 0');
 addMatchCol('turn2', 'turn2 INTEGER NOT NULL DEFAULT 0');
 addMatchCol('active_team', 'active_team INTEGER NOT NULL DEFAULT 1');
 addMatchCol('turn_active', 'turn_active INTEGER NOT NULL DEFAULT 0');
+// Ready check avant le coup d'envoi (les 2 coachs doivent être prêts)
+addMatchCol('ready1', 'ready1 INTEGER NOT NULL DEFAULT 0');
+addMatchCol('ready2', 'ready2 INTEGER NOT NULL DEFAULT 0');
 // Météo du match (2d6 lancés au coup d'envoi)
 addMatchCol('weather', 'weather TEXT');
 addMatchCol('weather_d1', 'weather_d1 INTEGER');

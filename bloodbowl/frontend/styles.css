@@ -25,6 +25,9 @@
   --blood-bright: #ff3344;
   --blood-deep: #8b1521;
   --field-green: #2d4a1e;            /* vert pelouse, accent rare */
+  --gold: #d4af37;                   /* or (titres de section, accents) */
+  --bone: #e8e1cf;                   /* blanc os (texte mis en avant) */
+  --moss: #6aa84f;                   /* vert mousse (valeurs positives) */
 
   --radius: 2px;                     /* coins très anguleux */
   --shadow-1: 0 2px 8px rgba(0,0,0,0.6);

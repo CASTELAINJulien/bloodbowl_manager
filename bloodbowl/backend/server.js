@@ -566,6 +566,10 @@ app.put('/api/matches/:id', authMiddleware(), (req, res) => {
   if (!canManage(req, match.tournament_id) && !isMatchCoach(req, match)) {
     return res.status(403).json({ error: 'Non autorisé' });
   }
+  // Un match terminé n'est modifiable que par l'organisateur/admin
+  if (match.status === 'completed' && !canManage(req, match.tournament_id)) {
+    return res.status(403).json({ error: 'Match terminé : seul l\'organisateur peut le modifier.' });
+  }
   const {
     td1, td2, cas1 = 0, cas2 = 0,
     passes1 = 0, passes2 = 0, aggressions1 = 0, aggressions2 = 0,
@@ -661,8 +665,12 @@ app.patch('/api/matches/:id/live', authMiddleware(), (req, res) => {
   if (!canManage(req, match.tournament_id) && !isMatchCoach(req, match)) {
     return res.status(403).json({ error: 'Non autorisé' });
   }
+  // Un match terminé n'est modifiable que par l'organisateur/admin
+  if (match.status === 'completed' && !canManage(req, match.tournament_id)) {
+    return res.status(403).json({ error: 'Match terminé : seul l\'organisateur peut le modifier.' });
+  }
   const allowed = ['td1','td2','cas1','cas2','passes1','passes2','aggressions1','aggressions2',
-                   'half','turn1','turn2','active_team','turn_active'];
+                   'half','turn1','turn2','active_team','turn_active','ready1','ready2'];
   const fields = []; const values = [];
   for (const k of allowed) {
     if (k in req.body) {

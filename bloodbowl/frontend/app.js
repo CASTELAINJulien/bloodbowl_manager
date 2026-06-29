@@ -876,8 +876,10 @@ function matchRow(m, t, teams, isOrganizer) {
       (canScore && t.status === 'in_progress' && !isCompleted)
         ? el('button', { class: 'btn btn-primary btn-sm', onclick: () => navigate('match', { id: m.id }) }, '▶ Jouer')
         : null,
-      canScore ? el('button', { class: 'btn btn-sm', onclick: () => showScoreModal(m) },
-        isCompleted ? 'Modifier' : 'Saisir') : null,
+      // Match terminé : seul l'organisateur peut modifier ; sinon le coach peut saisir
+      (isCompleted ? isOrganizer : canScore)
+        ? el('button', { class: 'btn btn-sm', onclick: () => showScoreModal(m) }, isCompleted ? 'Modifier' : 'Saisir')
+        : null,
     ),
   );
 }
@@ -1009,43 +1011,96 @@ function teamRecapPanel(m, side) {
 }
 
 async function renderMatchRecap(view, matchId) {
-  const m = await api('/matches/' + matchId);
-  view.innerHTML = '';
+  let m = await api('/matches/' + matchId);
 
-  view.appendChild(el('div', { class: 'detail-actions', style: 'margin-bottom:16px;' },
-    el('button', { class: 'btn btn-ghost', onclick: () => navigate('t', { id: m.tournament_id, tab: 'matches' }) }, '← Retour au tournoi'),
-  ));
+  // Côté du coach connecté (1, 2) ; null = admin/organisateur non-coach
+  const mySide = () => {
+    if (state.user && m.team1_user === state.user.id) return 1;
+    if (state.user && m.team2_user === state.user.id) return 2;
+    return null;
+  };
 
-  view.appendChild(el('h1', { class: 'page-title', style: 'text-align:center;' },
-    `${m.team1_name} vs ${m.team2_name}`));
-  view.appendChild(el('div', { style: 'text-align:center; color:var(--text-dim); font-family:var(--font-mono); letter-spacing:0.1em; text-transform:uppercase; margin-bottom:24px;' },
-    `${m.tournament_name || ''} · Tour ${m.round}`));
+  const setReady = async (val) => {
+    const side = mySide();
+    const patch = side === 1 ? { ready1: val } : side === 2 ? { ready2: val } : { ready1: val, ready2: val };
+    try {
+      const updated = await api('/matches/' + matchId + '/live', { method: 'PATCH', body: JSON.stringify(patch) });
+      m = { ...m, ...updated };
+      render();
+    } catch (err) { toast(err.message, 'error'); }
+  };
 
-  view.appendChild(el('div', { style: 'display:flex; gap:20px; flex-wrap:wrap; align-items:flex-start;' },
-    teamRecapPanel(m, 1),
-    teamRecapPanel(m, 2),
-  ));
-
-  const isCompleted = m.status === 'completed';
-  if (isCompleted) {
-    view.appendChild(el('div', { style: 'text-align:center; margin-top:28px; color:var(--text-dim);' },
-      `Match terminé · Score final ${m.td1} - ${m.td2}`));
-  } else if (canPlayMatch(m)) {
-    view.appendChild(el('div', { style: 'text-align:center; margin-top:32px;' },
-      el('button', {
-        class: 'btn btn-gold',
-        style: 'font-size:18px; padding:16px 32px;',
-        onclick: async () => {
-          // Lance la météo (idempotent côté serveur) avant d'entrer dans le live
-          try { await api('/matches/' + matchId + '/roll-weather', { method: 'POST' }); } catch { /* le live réessaiera */ }
-          window.location.hash = `#/match/${matchId}/live`;
-        },
-      }, "🥊  Let's get ready to rumble !"),
+  function render() {
+    view.innerHTML = '';
+    view.appendChild(el('div', { class: 'detail-actions', style: 'margin-bottom:16px;' },
+      el('button', { class: 'btn btn-ghost', onclick: () => navigate('t', { id: m.tournament_id, tab: 'matches' }) }, '← Retour au tournoi'),
     ));
-  } else {
-    view.appendChild(el('div', { style: 'text-align:center; margin-top:28px; color:var(--text-faint);' },
-      'Seuls les coachs de ce match peuvent lancer la rencontre.'));
+    view.appendChild(el('h1', { class: 'page-title', style: 'text-align:center;' },
+      `${m.team1_name} vs ${m.team2_name}`));
+    view.appendChild(el('div', { style: 'text-align:center; color:var(--text-dim); font-family:var(--font-mono); letter-spacing:0.1em; text-transform:uppercase; margin-bottom:24px;' },
+      `${m.tournament_name || ''} · Tour ${m.round}`));
+    view.appendChild(el('div', { style: 'display:flex; gap:20px; flex-wrap:wrap; align-items:flex-start;' },
+      teamRecapPanel(m, 1),
+      teamRecapPanel(m, 2),
+    ));
+
+    if (m.status === 'completed') {
+      view.appendChild(el('div', { style: 'text-align:center; margin-top:28px; color:var(--text-dim);' },
+        `Match terminé · Score final ${m.td1} - ${m.td2}`));
+      return;
+    }
+    if (!canPlayMatch(m)) {
+      view.appendChild(el('div', { style: 'text-align:center; margin-top:28px; color:var(--text-faint);' },
+        'Seuls les coachs de ce match peuvent lancer la rencontre.'));
+      return;
+    }
+
+    // Les deux prêts -> ouverture automatique de la fenêtre de match
+    if (m.ready1 && m.ready2) {
+      view.appendChild(el('div', { style: 'text-align:center; margin-top:24px; color:var(--moss, #4a7c2a); font-weight:700;' },
+        '✅ Les deux coachs sont prêts — lancement du match…'));
+      stopLivePoll();
+      window.location.hash = `#/match/${matchId}/live`;
+      return;
+    }
+
+    // État de préparation des deux coachs
+    view.appendChild(el('div', { style: 'text-align:center; margin-top:24px; font-family:var(--font-mono); font-size:13px; color:var(--text-dim);' },
+      `${m.team1_name} : ${m.ready1 ? '✅ prêt' : '⏳ en attente'}   ·   ${m.team2_name} : ${m.ready2 ? '✅ prêt' : '⏳ en attente'}`));
+
+    const section = el('div', { style: 'text-align:center; margin-top:14px;' });
+    const side = mySide();
+    if (side === null) {
+      // Organisateur/admin (pas un coach) : lance directement (marque les 2 prêts)
+      section.appendChild(el('button', { class: 'btn btn-gold', style: 'font-size:18px; padding:16px 32px;', onclick: () => setReady(1) },
+        '🥊  Lancer le match'));
+    } else {
+      const meReady = side === 1 ? m.ready1 : m.ready2;
+      if (!meReady) {
+        section.appendChild(el('button', { class: 'btn btn-gold', style: 'font-size:18px; padding:16px 32px;', onclick: () => setReady(1) },
+          "🥊  Let's get ready to rumble !"));
+      } else {
+        section.appendChild(el('div', { style: 'color:var(--netblitz-yellow); font-size:16px; font-weight:700; margin-bottom:10px;' },
+          "✅ Vous êtes prêt — en attente de l'adversaire…"));
+        section.appendChild(el('button', { class: 'btn btn-ghost btn-sm', onclick: () => setReady(0) }, 'Annuler'));
+      }
+    }
+    view.appendChild(section);
   }
+
+  render();
+
+  // Polling : détecte quand l'adversaire clique (ou se désiste), puis lance le match
+  stopLivePoll();
+  livePollTimer = setInterval(async () => {
+    try {
+      const fresh = await api('/matches/' + matchId);
+      if (fresh.ready1 !== m.ready1 || fresh.ready2 !== m.ready2 || fresh.status !== m.status) {
+        m = fresh;
+        render();
+      }
+    } catch { /* erreurs réseau ignorées */ }
+  }, 2000);
 }
 
 async function renderMatchLive(view, matchId) {
@@ -1315,28 +1370,52 @@ async function renderMatchLive(view, matchId) {
     const activeName = m[`team${m.active_team}_name`];
 
     view.appendChild(el('div', { class: 'detail-actions', style: 'margin-bottom:16px;' },
-      el('button', { class: 'btn btn-ghost', onclick: () => navigate('match', { id: matchId }) }, '← Récap'),
+      el('button', { class: 'btn btn-ghost', onclick: () => navigate('t', { id: m.tournament_id, tab: 'matches' }) }, '← Tournoi'),
     ));
 
-    // Tableau de score — chaque équipe a ses cases de compte-tours sous son nom
-    view.appendChild(el('div', { style: 'text-align:center; margin-bottom:8px;' },
-      el('div', { style: 'font-family:var(--font-mono); font-size:12px; letter-spacing:0.15em; text-transform:uppercase; color:var(--text-faint);' },
+    // === Scoreboard (style jour de match) ===
+    // Compte-tours en haut : un groupe de cases par équipe + la mi-temps au centre
+    view.appendChild(el('div', { style: 'display:flex; align-items:center; justify-content:center; gap:18px; flex-wrap:wrap; margin-bottom:8px;' },
+      teamTurnBoxes(1),
+      el('span', { style: 'font-family:var(--font-mono); font-size:11px; letter-spacing:0.15em; text-transform:uppercase; color:var(--text-faint); white-space:nowrap;' },
         `Mi-temps ${m.half} / 2`),
-      el('div', { style: 'display:flex; align-items:flex-start; justify-content:center; gap:24px; margin-top:8px;' },
-        el('div', { style: 'display:flex; flex-direction:column; align-items:center; max-width:320px;' },
-          m.team1_logo ? el('img', { src: m.team1_logo, alt: '', style: 'width:40px; height:40px; object-fit:contain; border-radius:6px; margin-bottom:4px;' }) : null,
-          el('span', { style: 'font-family:var(--font-display); font-size:22px; color:#fff;' }, m.team1_name),
-          teamTurnBoxes(1),
-        ),
-        el('span', { style: 'font-family:var(--font-display); font-size:48px; font-weight:900; color:var(--netblitz-yellow); line-height:1;' },
-          `${m.td1 || 0} - ${m.td2 || 0}`),
-        el('div', { style: 'display:flex; flex-direction:column; align-items:center; max-width:320px;' },
-          m.team2_logo ? el('img', { src: m.team2_logo, alt: '', style: 'width:40px; height:40px; object-fit:contain; border-radius:6px; margin-bottom:4px;' }) : null,
-          el('span', { style: 'font-family:var(--font-display); font-size:22px; color:#fff;' }, m.team2_name),
-          teamTurnBoxes(2),
-        ),
-      ),
+      teamTurnBoxes(2),
     ));
+
+    // Bloc score : équipe gauche · (score + comparaison stats) · équipe droite
+    const teamSide = (side) => el('div', { style: 'flex:1 1 180px; min-width:160px; text-align:center;' },
+      m[`team${side}_logo`] ? el('img', { src: m[`team${side}_logo`], alt: '', style: 'width:72px; height:72px; object-fit:contain; margin-bottom:6px;' }) : null,
+      el('div', { style: 'font-family:var(--font-display); font-size:22px; font-weight:900; color:#fff; text-transform:uppercase; line-height:1.1;' },
+        m[`team${side}_name`]),
+      m[`team${side}_race`] ? el('div', { style: 'font-family:var(--font-mono); font-size:11px; letter-spacing:0.12em; text-transform:uppercase; color:var(--text-faint); margin-top:3px;' }, m[`team${side}_race`]) : null,
+      m[`team${side}_coach`] ? el('div', { style: 'font-size:13px; color:var(--text-dim); margin-top:4px;' }, m[`team${side}_coach`]) : null,
+    );
+    const statRow = (icon, v1, v2) => el('div', { style: 'display:flex; align-items:center; justify-content:center; gap:16px; font-family:var(--font-mono); font-size:15px;' },
+      el('span', { style: 'min-width:30px; text-align:right; color:var(--bone); font-weight:700;' }, String(v1 || 0)),
+      el('span', { style: 'font-size:16px;' }, icon),
+      el('span', { style: 'min-width:30px; text-align:left; color:var(--bone); font-weight:700;' }, String(v2 || 0)),
+    );
+    const scoreCenter = el('div', { style: 'flex:0 0 auto; text-align:center; padding:0 8px; min-width:150px;' },
+      el('div', { style: 'font-family:var(--font-display); font-size:54px; font-weight:900; color:var(--netblitz-yellow); line-height:1;' },
+        `${m.td1 || 0} : ${m.td2 || 0}`),
+      el('div', { style: 'display:flex; flex-direction:column; gap:5px; margin-top:10px;' },
+        statRow('🎯', m.passes1, m.passes2),
+        statRow('💀', m.cas1, m.cas2),
+        statRow('👊', m.aggressions1, m.aggressions2),
+      ),
+    );
+    view.appendChild(el('div', { style: 'display:flex; align-items:center; justify-content:center; gap:8px; flex-wrap:wrap; margin-bottom:10px;' },
+      teamSide(1), scoreCenter, teamSide(2),
+    ));
+
+    // Bandeau météo (comme la référence)
+    if (m.weather) {
+      const WICON = { 'Canicule': '🔥', 'Très ensoleillé': '☀️', 'Météo clémente': '🌤️', 'Averse': '🌧️', 'Blizzard': '❄️' };
+      view.appendChild(el('div', { style: 'display:flex; align-items:center; justify-content:center; gap:10px; padding:8px; border-top:1px solid var(--line); border-bottom:1px solid var(--line); font-family:var(--font-mono); font-size:12px; letter-spacing:0.08em; text-transform:uppercase; color:var(--text-dim); margin-bottom:14px;' },
+        `${WICON[m.weather] || '🌦️'} ${m.weather}`,
+        m.weather_d1 ? el('span', { style: 'color:var(--text-faint);' }, `· 🎲 ${m.weather_d1} + ${m.weather_d2}`) : null,
+      ));
+    }
 
     // Compte-tours
     if (!matchComplete) {
