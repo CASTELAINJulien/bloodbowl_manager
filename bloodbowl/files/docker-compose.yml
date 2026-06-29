@@ -1,0 +1,45 @@
+services:
+  caddy:
+    image: caddy:2-alpine
+    container_name: bb_caddy
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    environment:
+      - SITE_ADDRESS=${SITE_ADDRESS:-localhost}
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./frontend:/srv:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - backend
+    networks:
+      - bbnet
+
+  backend:
+    build: ./backend
+    container_name: bb_backend
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      - DB_DIR=/app/data
+      - JWT_SECRET=${JWT_SECRET}
+    volumes:
+      - bb_data:/app/data
+    networks:
+      - bbnet
+    # Ne pas exposer en direct, Caddy fait le proxy
+    expose:
+      - "3001"
+
+volumes:
+  caddy_data:
+  caddy_config:
+  bb_data:
+
+networks:
+  bbnet:
+    driver: bridge
